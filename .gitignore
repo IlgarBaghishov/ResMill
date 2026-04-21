@@ -12,3 +12,5 @@ venv/
 *.npy
 *.npz
 .claude/
+_compare/
+.DS_Store

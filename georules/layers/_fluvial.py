@@ -16,10 +16,13 @@ class fluvial:
     # facies: 0 shale; 1 pointbar/channel fill; 2 abandon channel; 3 levee; 4 splay
 
     def __init__(self, station=1/32, complex_wid=500, b=80, Cf=0.0009, A=10.0,
-                 I=0.008, Q=0.9, meander_scale=0.8, dwratio=0.4, nlevel=10, pavul=0,
+                 I=0.008, Q=0.9, meander_scale=0.8, dwratio=0.4, nlevel=6, pavul=0,
                  nx=256, ny=128, nz=64, xmn=8, ymn=8, xsiz=16, ysiz=16, zsiz=3,
                  rs=69069, ntg=1000, erode=0.1, lsplay=0, msplay=0, hsplay=0,
-                 ntime=10, azi0=0, bankratio=2, myidx=0):
+                 ntime=10, azi0=0, bankratio=2, myidx=0,
+                 migration_distance_ratio=1.0, boundary_reflect=True,
+                 aggradation_mode='discrete', level_reseed_prob=0.6,
+                 level_jump_ratio=1.0):
         self.myidx = myidx
         self.b = b
         self.dwratio = dwratio
@@ -71,6 +74,24 @@ class fluvial:
         self.msplay = msplay
         self.hsplay = hsplay
         self.ntime = ntime
+        # Per-step lateral migration scale, expressed as a multiple of
+        # (xsiz+ysiz). Alluvsim draws distMigrate ~ Gaussian(25-50 m) per
+        # step and rescales the bank-velocity field to match. The original
+        # hard-coded value here was 2.5 which, combined with the continuous
+        # aggradation schedule, gave a ~8:1 lateral:vertical ratio and made
+        # channels slither diagonally through Z.
+        self.migration_distance = migration_distance_ratio
+        self.boundary_reflect = boundary_reflect
+        # 'discrete' = Alluvsim-style nlevel aggradation: chelev jumps by one
+        # channel depth at each of `nlevel` level boundaries, stamps emit
+        # only at boundaries, and the streamline is optionally re-seeded
+        # with probability `level_reseed_prob`. Per-Z slices show one crisp
+        # meander each, rather than 80 overlaid migration snapshots.
+        # 'continuous' = legacy: per-iter tiny chelev increments + stamps
+        # every 10 iters. Produces amalgamated channel belt.
+        self.aggradation_mode = aggradation_mode
+        self.level_reseed_prob = level_reseed_prob
+        self.level_jump_ratio = level_jump_ratio
         g = 9.8
         self.g = g
         self.us0 = ((g * Q * I) / (2.0 * b * Cf))**(1.0 / 3.0)
@@ -195,6 +216,135 @@ class fluvial:
         idx = (np.abs(array - value)).argmin()
         return idx
 
+    def _reseed_streamline(self, s_noise, random_y=False):
+        """Draw a new streamline from scratch.
+
+        ``random_y=True`` picks a fresh random Y within the interior band
+        (used between aggradation levels in discrete mode).  Otherwise the
+        new Y is either a reflection of the current channel's tail across
+        the mid-Y (``boundary_reflect=True``, preserves Z-continuity
+        after a touch_b event) or simply the mid-Y.
+        """
+        ymid = 0.5 * (self.ymin + self.ymax)
+        if random_y:
+            margin = 0.25 * (self.ymax - self.ymin)
+            chy = float(np.random.uniform(self.ymin + margin,
+                                          self.ymax - margin))
+        elif self.boundary_reflect:
+            in_grid = ((self.cx > self.xmin) & (self.cx < self.xmax)
+                       & (self.cy > self.ymin) & (self.cy < self.ymax))
+            tail = self.cy[in_grid][-20:] if in_grid.sum() >= 20 else self.cy
+            chy = 2.0 * ymid - float(np.mean(tail))
+            margin = 0.25 * (self.ymax - self.ymin)
+            chy = float(np.clip(chy, self.ymin + margin, self.ymax - margin))
+        else:
+            chy = ymid
+        success = 0
+        attempts = 0
+        while success == 0:
+            angle = np.random.uniform(-np.pi / 1800, np.pi / 1800)
+            success = self.generate_streamline(y0=chy, m=angle, s=s_noise)
+            attempts += 1
+            if attempts >= 20:
+                chy = ymid
+        self.chwidth = self.b * np.ones(self.ndis)
+        self.maxb = 2 * np.max(self.chwidth)
+        self.touch_b = 0
+
+    def _stamp_current_streamline(self, NNN):
+        """Paint the current streamline into ``self.facies`` at
+        ``self.chelev``.  Assumes ``cal_curv`` has been called so
+        ``vx/vy/curv/thalweg`` are current."""
+        mygood = ((self.cx > self.xmin) * (self.cx < self.xmax)
+                  * (self.cy > self.ymin) * (self.cy < self.ymax))
+        mygood = mygood.astype(bool)
+        if mygood.sum() < 20:
+            return
+        cx = self.cx[mygood]
+        cy = self.cy[mygood]
+        vx_f = self.vx[mygood]
+        vy_f = self.vy[mygood]
+        curv = self.curv[mygood]
+        thalweg = self.thalweg[mygood]
+        chwidth = self.chwidth[mygood]
+        genchannel(
+            self.b, self.xsiz, self.ysiz, self.chelev, self.zsiz,
+            self.nx, self.ny, self.nz, cx, cy, self.x, self.y,
+            vx_f, vy_f, curv, self.LV_asym, self.lV_height,
+            self.ps, self.pavul, self.out, self.totalid, self.facies,
+            self.poro, self.poro0, thalweg, chwidth, self.dwratio,
+            [1000000000], NNN,
+        )
+
+    def _migrate_one_step(self):
+        """One Sun-1996 bank-retreat migration step.  Updates ``cx/cy``
+        in place and populates ``self.idxx`` with the keep-mask from
+        ``make_cutoff``.  Sets ``self.touch_b=1`` if the streamline is
+        approaching a Y-boundary.  Returns 0 if the streamline is too
+        short to continue, 1 otherwise."""
+        if self.cx.size < 20:
+            return 0
+        self.cal_curv()
+        self.usbmat = np.zeros(self.ndis)
+        for idis in np.arange(1, self.ndis):
+            dx = self.splx.integral(self.length[idis - 1], self.length[idis])
+            dy = self.sply.integral(self.length[idis - 1], self.length[idis])
+            dlength = np.sqrt(dx**2 + dy**2)
+            self.usbmat[idis] = (
+                self.b / (self.us0 / dlength + 2 * (self.us0 / self.h0) * self.Cf)
+                * (-self.us0**2 * self.dcsids[idis]
+                   + self.Cf * self.curv[idis] * (self.us0**4 / self.g / self.h0**2
+                                                  + self.A * self.us0**2 / self.h0)
+                   + self.us0 / dlength * self.usbmat[idis - 1] / self.b)
+            )
+        self.usbmat = np.abs(self.usbmat)
+
+        tmigrate = self.migration_distance * (self.xsiz + self.ysiz)
+        vt = np.sqrt(self.vx**2 + self.vy**2)
+        damp = np.ones(self.cx.size)
+        dist = np.arange(self.cx.size)
+        damp = 2 - 2 / (1 + np.exp(-np.abs(dist - dist.mean()) / 100))
+        self.usbmat_vx = (np.sign(self.curv) * self.vy / vt * self.usbmat * damp
+                          + 100 * self.us0 * self.vx / vt)
+        self.usbmat_vy = (-np.sign(self.curv) * self.vx / vt * self.usbmat * damp
+                          + 100 * self.us0 * self.vy / vt)
+        self.usbmat_t = np.sqrt(self.usbmat_vx**2 + self.usbmat_vy**2)
+        self.maxmigrate = np.max(self.usbmat_t)
+        self.E = tmigrate / self.maxmigrate
+
+        self.cy[:21] = self.cy[16]
+        self.cx[20:] = self.cx[20:] + self.usbmat_vx[20:] * self.E
+        self.cy[20:] = self.cy[20:] + self.usbmat_vy[20:] * self.E
+
+        cut_dist = int(1 * self.ndis / 2)
+        thresh = self.b * 2.5
+        idxx = np.ones(self.ndis)
+        make_cutoff(self.step, self.ndis, self.dlength, thresh, cut_dist,
+                    self.cx, self.cy, idxx, self.totalid)
+
+        if (np.sum(self.cy > self.ymax - self.ny / 5 * self.ysiz * (1 - self.chelev / self.nz / self.zsiz))
+                + np.sum(self.cy < self.ymin + self.ny / 5 * self.ysiz * (1 - self.chelev / self.nz / self.zsiz))) > 0:
+            if self.totalid > 10:
+                self.touch_b = 1
+
+        idxx[self.cx < self.x0] = 0
+        idxx[self.cx > self.x1] = 0
+        self.idxx = idxx
+        return 1
+
+    def _trim_streamline(self):
+        """Apply the current idxx cutoff mask and restore pinned endpoints.
+        Returns 0 if too few nodes remain, 1 otherwise."""
+        self.cx = self.cx[self.idxx.astype(bool)]
+        self.cy = self.cy[self.idxx.astype(bool)]
+        if self.cx.size < 20:
+            return 0
+        self.cx[0] = self.x0
+        self.cy[0] = self.y0
+        self.cx[-1] = self.x1
+        self.cy[-1] = self.y1
+        return 1
+
     def simulation(self, nchannel=10):
         self.itime = 0
         self.facies = np.zeros((self.nx, self.ny, self.nz))
@@ -224,6 +374,9 @@ class fluvial:
         self.mybot = 0
 
         NNN = nchannel * 10
+        if self.aggradation_mode == 'discrete':
+            return self._simulate_discrete(nchannel, NNN, s_noise)
+
         for ddd in range(NNN):
             self.myinit -= 1
             self.ps = 1
@@ -247,14 +400,27 @@ class fluvial:
                 )
                 self.out = 0
 
+                ymid = 0.5 * (self.ymin + self.ymax)
+                if self.boundary_reflect:
+                    # Reflect the last in-grid segment across ymid instead of
+                    # restarting at mid-Y. Preserves Z-continuity of the
+                    # channel belt across boundary-touch events.
+                    in_grid = ((self.cx > self.xmin) & (self.cx < self.xmax)
+                               & (self.cy > self.ymin) & (self.cy < self.ymax))
+                    tail = self.cy[in_grid][-20:] if in_grid.sum() >= 20 else self.cy
+                    chy = 2.0 * ymid - float(np.mean(tail))
+                    margin = 0.25 * (self.ymax - self.ymin)
+                    chy = float(np.clip(chy, self.ymin + margin, self.ymax - margin))
+                else:
+                    chy = ymid
                 success = 0
+                attempts = 0
                 while success == 0:
-                    chy = np.random.uniform(
-                        self.ymin + (self.ymax - self.ymin) / 2,
-                        self.ymin + (self.ymax - self.ymin) / 2,
-                    )
                     angle = np.random.uniform(-np.pi / 1800, np.pi / 1800)
                     success = self.generate_streamline(y0=chy, m=angle, s=s_noise)
+                    attempts += 1
+                    if attempts >= 20:
+                        chy = ymid
                 self.chwidth = self.b * np.ones(self.ndis)
                 self.maxb = 2 * np.max(self.chwidth)
                 self.touch_b = 0
@@ -280,7 +446,7 @@ class fluvial:
                 )
             self.usbmat = np.abs(self.usbmat)
 
-            tmigrate = (self.xsiz + self.ysiz) * 2.5
+            tmigrate = self.migration_distance * (self.xsiz + self.ysiz)
             vt = np.sqrt(self.vx**2 + self.vy**2)
 
             damp = np.ones(self.cx.size)
@@ -343,5 +509,59 @@ class fluvial:
             self.cx[-1] = self.x1
             self.cy[-1] = self.y1
             self.idxx = idxx
+
+        self.cal_curv()
+
+    def _simulate_discrete(self, nchannel, NNN, s_noise):
+        """Alluvsim-style nlevel aggradation.
+
+        The streamline migrates for ``iters_per_level`` iterations at a
+        fixed ``chelev``; a single snapshot is stamped at the end of the
+        level; ``chelev`` jumps by one channel depth; with probability
+        ``level_reseed_prob`` the streamline is re-drawn from a fresh
+        random Y for the next level.  Cf. Alluvsim's ``streamsim.for``
+        main loop + ``pv_shoestring`` preset (``nlevel=5`` over
+        ``ntime=120`` iterations, ``probAvulOutside+probAvulInside≈0.15``).
+
+        Per-Z slices each show one crisp meander rather than ~80 overlaid
+        migration snapshots piled into ~12 Z cells.
+        """
+        totalid = self.totalid
+        nlevel = max(1, self.nlevel)
+        iters_per_level = max(1, NNN // nlevel)
+        # jump = level_jump_ratio × channel depth.  ratio=1.0 stacks
+        # stamps with no vertical overlap (Alluvsim pv_shoestring); ratio
+        # <1 gives increasing overlap → a single continuous channel belt
+        # when combined with level_reseed_prob=0.
+        jump = self.level_jump_ratio * self.cz * self.zsiz
+
+        for ilevel in range(nlevel):
+            for inner in range(iters_per_level):
+                self.myinit -= 1
+                self.ps = 1
+                self.out = 0
+                totalid += 1
+                self.totalid = totalid
+
+                if self.touch_b == 1:
+                    self.out = 1
+                    self.cal_curv()
+                    self._stamp_current_streamline(NNN)
+                    self.out = 0
+                    self._reseed_streamline(s_noise)
+                    continue
+
+                if self._migrate_one_step() == 0:
+                    break
+                if self._trim_streamline() == 0:
+                    break
+
+            self.cal_curv()
+            self._stamp_current_streamline(NNN)
+
+            self.chelev = self.chelev + jump
+
+            if ilevel < nlevel - 1 and np.random.uniform() < self.level_reseed_prob:
+                self._reseed_streamline(s_noise, random_y=True)
 
         self.cal_curv()
