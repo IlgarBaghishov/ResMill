@@ -2,6 +2,8 @@ import numpy as np
 
 from .base import Layer
 
+__all__ = ["ChannelLayerBase", "MeanderingChannelLayer", "BraidedChannelLayer"]
+
 
 class ChannelLayerBase(Layer):
     """Base class for channel-type geological layers."""
@@ -28,7 +30,8 @@ class MeanderingChannelLayer(ChannelLayerBase):
                        meander_scale=1.2, avulsion_prob=0, poro_ave=0.3,
                        migration_distance_ratio=1.0, boundary_reflect=True,
                        aggradation_mode='discrete', nlevel=6,
-                       level_reseed_prob=0.6, level_jump_ratio=1.0):
+                       level_reseed_prob=0.6, level_jump_ratio=1.0,
+                       prob_avul_inside=0.0, prob_avul_outside=0.0):
         """Generate meandering channel geology.
 
         Parameters
@@ -100,6 +103,16 @@ class MeanderingChannelLayer(ChannelLayerBase):
             overlap vertically; combined with ``level_reseed_prob=0`` and
             many levels this produces a single continuous channel belt
             that migrates slowly from z=0 to the top.
+        prob_avul_inside : float
+            Per-iteration probability of Alluvsim-style in-model
+            avulsion (``avulsioninside.for``): pick a node weighted by
+            ``|curvature|``, stamp the current path, then regrow a
+            fresh tail from that node's local azimuth.  Default 0
+            (pure meandering).  Larger values (~0.5) drive braided
+            architectures — see ``BraidedChannelLayer``.
+        prob_avul_outside : float
+            Per-iteration probability of fully reseeding the streamline
+            at a random Y.  Default 0.
         """
         from ._fluvial import fluvial
 
@@ -116,56 +129,113 @@ class MeanderingChannelLayer(ChannelLayerBase):
             aggradation_mode=aggradation_mode, nlevel=nlevel,
             level_reseed_prob=level_reseed_prob,
             level_jump_ratio=level_jump_ratio,
+            prob_avul_inside=prob_avul_inside,
+            prob_avul_outside=prob_avul_outside,
         )
         engine.simulation(nchannel=n_channels)
         self._finalize_properties(engine.poro, engine.facies, poro_ave)
 
 
-class BraidedChannelLayer(ChannelLayerBase):
-    """Layer with braided fluvial channel geology."""
+class BraidedChannelLayer(MeanderingChannelLayer):
+    """Braided fluvial channels — ``MeanderingChannelLayer`` with braided presets.
 
-    def create_geology(self, braidplain_width, n_channels, n_threads=3,
-                       thread_width=None, depth_width_ratio=0.15,
+    Same ``fluvial`` streamline engine as the parent class, just
+    configured per Alluvsim's CB-jigsaw / SH-proximal braided presets:
+    moderate sinuosity (meander_scale~0.9), shallow/wide cross-section
+    (depth_width_ratio~0.1), aggressive avulsion
+    (prob_avul_inside=0.55, prob_avul_outside=0.30).  Avulsions
+    truncate the current streamline at a |curvature|-weighted node
+    and regrow a fresh tail; out-of-model avulsions re-seed the
+    streamline at a random Y.  Stamps accumulate abandoned fragments,
+    producing the classic braided interwoven-threads appearance.
+
+    Cf. Pyrcz (2004) avulsioninside.for + streamsim.for main loop.
+    """
+
+    def create_geology(self, braidplain_width, n_channels=24,
+                       depth_width_ratio=0.1,
+                       meander_scale=0.9,
+                       migration_distance_ratio=0.3,
+                       prob_avul_inside=0.55, prob_avul_outside=0.30,
+                       nlevel=None, level_reseed_prob=0.4,
+                       level_jump_ratio=0.5,
                        slope=0.008, discharge=0.9,
-                       bar_poro_factor=0.7, poro_ave=0.3):
+                       amplitude=10.0, friction_coeff=0.0009,
+                       poro_ave=0.3,
+                       n_threads=None, thread_width=None,
+                       bar_poro_factor=None):
         """Generate braided channel geology.
+
+        All parameters are forwarded to
+        ``MeanderingChannelLayer.create_geology``; defaults below are
+        the braided presets.
 
         Parameters
         ----------
         braidplain_width : float
-            Total width of the braided belt (same units as x_len/y_len).
+            Full width of a single thread (maps to parent's
+            ``channel_width``).  Narrow gives wide interwoven fragments;
+            wide gives a few wandering channels.
         n_channels : int
-            Number of channel generations (aggradation steps).
-        n_threads : int
-            Number of simultaneous channel threads per generation.
-        thread_width : float or None
-            Half-width of each individual thread. If None,
-            auto-calculated as braidplain_width / (2 * n_threads).
+            Number of channel generations (default 24).
         depth_width_ratio : float
-            Individual thread depth-to-width ratio (default 0.15,
-            shallower than meandering default of 0.4).
-        slope : float
-            Channel slope.
-        discharge : float
-            Normalized discharge.
-        bar_poro_factor : float
-            Bar porosity as fraction of poro_ave (default 0.7).
+            Channel depth-to-width ratio (default 0.1, shallower than
+            meandering 0.4 — Alluvsim braided presets use ~0.05-0.08).
+        meander_scale : float
+            Sinuosity of each streamline (default 0.9).  Alluvsim's
+            literal braided preset is ~0.35, but at small grid
+            resolutions that reads as nearly straight.
+        migration_distance_ratio : float
+            Per-step lateral migration (default 0.3 — braided channels
+            avulse more than they migrate).
+        prob_avul_inside : float
+            Per-iter probability of in-model avulsion (default 0.55).
+        prob_avul_outside : float
+            Per-iter probability of full streamline reseed at a random
+            Y (default 0.30 — higher than Alluvsim's CB-jigsaw preset
+            of ~0.12 so multiple concurrent threads are visible per
+            XY slice at typical grid resolutions).
+        nlevel : int or None
+            Discrete aggradation levels.  When None (default), chosen
+            so that ``nlevel * level_jump_ratio * channel_depth``
+            covers the full grid Z range.
+        level_reseed_prob : float
+            Probability of re-drawing at random Y between levels
+            (default 0.4).
+        level_jump_ratio : float
+            Fraction of channel depth per level jump (default 0.5 —
+            half-depth overlap between levels).
+        slope, discharge, amplitude, friction_coeff : float
+            Sun-1996 flow parameters.
         poro_ave : float
             Reference porosity for channel fill (default 0.3).
+        n_threads, thread_width, bar_poro_factor :
+            Deprecated — no-ops retained for API backwards compatibility
+            with the old BBC engine.  Ignored.
         """
-        from ._braided import braided
+        if nlevel is None:
+            cz_est = max(1, int(depth_width_ratio * braidplain_width
+                                 / self.dz))
+            step_cells = max(1.0, level_jump_ratio * cz_est)
+            nlevel = max(6, int(np.ceil(self.nz / step_cells)))
 
-        engine = braided(
-            braidplain_width=braidplain_width,
-            n_threads=n_threads,
-            thread_width=thread_width,
-            nx=self.nx, ny=self.ny, nz=self.nz,
-            xmn=self.dx / 2, ymn=self.dy / 2,
-            xsiz=self.dx, ysiz=self.dy, zsiz=self.dz,
-            dwratio=depth_width_ratio,
-            I=slope, Q=discharge,
-            bar_poro_factor=bar_poro_factor,
+        super().create_geology(
+            channel_width=braidplain_width,
+            n_channels=n_channels,
+            depth_width_ratio=depth_width_ratio,
+            friction_coeff=friction_coeff,
+            amplitude=amplitude,
+            slope=slope,
+            discharge=discharge,
+            meander_scale=meander_scale,
+            poro_ave=poro_ave,
+            migration_distance_ratio=migration_distance_ratio,
+            boundary_reflect=True,
+            aggradation_mode='discrete',
+            nlevel=nlevel,
+            level_reseed_prob=level_reseed_prob,
+            level_jump_ratio=level_jump_ratio,
+            prob_avul_inside=prob_avul_inside,
+            prob_avul_outside=prob_avul_outside,
         )
-        engine.simulation(n_channels=n_channels)
-        self._finalize_properties(engine.poro, engine.facies, poro_ave)
 

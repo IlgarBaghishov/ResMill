@@ -22,7 +22,8 @@ class fluvial:
                  ntime=10, azi0=0, bankratio=2, myidx=0,
                  migration_distance_ratio=1.0, boundary_reflect=True,
                  aggradation_mode='discrete', level_reseed_prob=0.6,
-                 level_jump_ratio=1.0):
+                 level_jump_ratio=1.0,
+                 prob_avul_inside=0.0, prob_avul_outside=0.0):
         self.myidx = myidx
         self.b = b
         self.dwratio = dwratio
@@ -92,6 +93,15 @@ class fluvial:
         self.aggradation_mode = aggradation_mode
         self.level_reseed_prob = level_reseed_prob
         self.level_jump_ratio = level_jump_ratio
+        # In-model avulsion (Alluvsim avulsioninside.for): pick a node
+        # weighted by |curvature|, truncate the streamline there, and
+        # grow a fresh DP-model branch from that node's azimuth.  Drives
+        # braided architectures when prob_avul_inside is large (~0.5).
+        # Out-of-model avulsion: fully reseed the streamline at a random
+        # Y (~0.1 for braided preset).  Both default 0 for a pure
+        # meandering run.
+        self.prob_avul_inside = prob_avul_inside
+        self.prob_avul_outside = prob_avul_outside
         g = 9.8
         self.g = g
         self.us0 = ((g * Q * I) / (2.0 * b * Cf))**(1.0 / 3.0)
@@ -345,6 +355,101 @@ class fluvial:
         self.cy[-1] = self.y1
         return 1
 
+    def _avulse_inmodel(self, s_noise):
+        """Port of Alluvsim's ``avulsioninside.for``.
+
+        Pick an avulsion node weighted by ``|curvature|``, copy nodes
+        up to that index, and grow a fresh tail from there using the
+        same AR(2) disturbed-periodic (Ferguson-1976) generator that
+        ``generate_streamline`` uses.  The tail direction is seeded
+        from the local tangent at the avulsion node; noise amplitude
+        ``s_noise`` matches the parent streamline's sinuosity.  The
+        tail is truncated at grid escape.
+
+        Used with ``prob_avul_inside > 0`` to produce braided-style
+        interwoven abandoned fragments: each avulsion stamps the
+        current path before splicing, so earlier branches persist in
+        ``self.facies`` while the new tail migrates.
+        """
+        if self.cx.size < 20:
+            return
+        curv_abs = np.abs(self.curv)
+        w = curv_abs.copy()
+        if w.size > 10:
+            w[:5] = 0
+            w[-5:] = 0
+        if w.sum() <= 1e-12:
+            ianode = int(np.random.randint(5, max(self.cx.size - 5, 6)))
+        else:
+            p = w / w.sum()
+            ianode = int(np.random.choice(len(p), p=p))
+
+        if 0 <= ianode < self.vx.size:
+            vxn, vyn = self.vx[ianode], self.vy[ianode]
+        else:
+            vxn = self.cx[-1] - self.cx[-2]
+            vyn = self.cy[-1] - self.cy[-2]
+        local_azi = np.arctan2(vyn, vxn)
+
+        k = 0.1 * self.step0
+        h = 0.8
+        phi = np.arcsin(h)
+        b1 = 2.0 * np.exp(-k * h) * np.cos(k * np.cos(phi))
+        b2 = -1.0 * np.exp(-2.0 * k * h)
+
+        n_extend = self.ndis0
+        noise = s_noise * np.random.normal(0, 1, n_extend)
+        ar = np.array([1, b1, b2])
+        theta = scipy.signal.lfilter([1], ar, noise) + local_azi
+
+        step = self.step0
+        dx_new = step * np.cos(theta)
+        dy_new = step * np.sin(theta)
+        new_x = self.cx[ianode] + np.cumsum(dx_new)
+        new_y = self.cy[ianode] + np.cumsum(dy_new)
+
+        out_of_grid = ((new_x > self.xmax) | (new_x < self.xmin)
+                       | (new_y > self.ymax) | (new_y < self.ymin))
+        if out_of_grid.any():
+            escape_idx = int(np.argmax(out_of_grid)) + 4
+        else:
+            escape_idx = new_x.size
+        escape_idx = int(min(max(escape_idx, 0), new_x.size))
+        if escape_idx < 5:
+            return
+        new_x = new_x[:escape_idx]
+        new_y = new_y[:escape_idx]
+
+        cx_new = np.concatenate([self.cx[:ianode + 1], new_x])
+        cy_new = np.concatenate([self.cy[:ianode + 1], new_y])
+        if cx_new.size < 20:
+            return
+
+        length = np.zeros(cx_new.size)
+        length[1:] = np.sqrt((cx_new[1:] - cx_new[:-1]) ** 2
+                             + (cy_new[1:] - cy_new[:-1]) ** 2)
+        length = np.cumsum(length)
+        if length[-1] < 1e-3:
+            return
+        try:
+            splx = UnivariateSpline(length, cx_new, k=5, s=0)
+            sply = UnivariateSpline(length, cy_new, k=5, s=0)
+        except Exception:
+            return
+
+        n_fine = max(cx_new.size * 4, self.ndis0)
+        fine = np.linspace(0.0, length[-1], n_fine)
+        self.cx = splx(fine)
+        self.cy = sply(fine)
+        self.ndis = self.cx.size
+        self.x0 = float(self.cx[0])
+        self.y0 = float(self.cy[0])
+        self.x1 = float(self.cx[-1])
+        self.y1 = float(self.cy[-1])
+        self.chwidth = self.b * np.ones(self.ndis)
+        self.maxb = 2 * np.max(self.chwidth)
+        self.touch_b = 0
+
     def simulation(self, nchannel=10):
         self.itime = 0
         self.facies = np.zeros((self.nx, self.ny, self.nz))
@@ -535,6 +640,8 @@ class fluvial:
         # when combined with level_reseed_prob=0.
         jump = self.level_jump_ratio * self.cz * self.zsiz
 
+        p_out = self.prob_avul_outside
+        p_in = self.prob_avul_inside
         for ilevel in range(nlevel):
             for inner in range(iters_per_level):
                 self.myinit -= 1
@@ -550,6 +657,24 @@ class fluvial:
                     self.out = 0
                     self._reseed_streamline(s_noise)
                     continue
+
+                # Avulsion draws happen BEFORE migration so the current
+                # streamline is stamped first — this preserves the
+                # pre-avulsion branch as an abandoned fragment in
+                # self.facies, producing the overlapping interwoven
+                # fragments that read as braided when p_in is large.
+                if p_out > 0.0 or p_in > 0.0:
+                    u = np.random.uniform()
+                    if u < p_out:
+                        self.cal_curv()
+                        self._stamp_current_streamline(NNN)
+                        self._reseed_streamline(s_noise, random_y=True)
+                        continue
+                    if u < p_out + p_in:
+                        self.cal_curv()
+                        self._stamp_current_streamline(NNN)
+                        self._avulse_inmodel(s_noise)
+                        continue
 
                 if self._migrate_one_step() == 0:
                     break
