@@ -52,10 +52,13 @@ def mychannel(nz, lV_height, LV_asym, curv, mynx, myny, localx, localy,
             maxD = 4.0 * t * (max(0, 1.0 - wid2 / WW))**ddy * (1.0 - (max(0, 1.0 - wid2 / WW))**ddy)
 
         ddz = int(max(((chelev - chbot) / zsiz), 0))
-        facies[idx, idy, idz - ddz:idz] = 1
+        facies[idx, idy, max(idz - ddz, 0):min(idz, nz)] = 1
         maxDint = int(maxD / zsiz)
         for myz in np.arange(ddz):
-            poro[idx, idy, idz - myz] = (
+            iz = idz - myz
+            if iz < 0 or iz >= nz:
+                continue
+            poro[idx, idy, iz] = (
                 (0.9 / (1 + np.exp(-4 * (myz / (maxDint) - 0.2))) + 0.1)
                 * (poro0) * (min((chelev - chbot) / (maxD), 1)**2) + 0.1
             )
