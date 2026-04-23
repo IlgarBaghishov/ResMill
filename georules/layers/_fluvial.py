@@ -264,25 +264,24 @@ class fluvial:
     def _stamp_current_streamline(self, NNN):
         """Paint the current streamline into ``self.facies`` at
         ``self.chelev``.  Assumes ``cal_curv`` has been called so
-        ``vx/vy/curv/thalweg`` are current."""
-        mygood = ((self.cx > self.xmin) * (self.cx < self.xmax)
-                  * (self.cy > self.ymin) * (self.cy < self.ymax))
-        mygood = mygood.astype(bool)
-        if mygood.sum() < 20:
+        ``vx/vy/curv/thalweg`` are current.
+
+        The streamline is passed through as-is, including nodes that
+        fall outside the grid.  ``genchannel``'s ``find_near_grid``
+        clips stamping to valid grid cells, and keeping the out-of-grid
+        nodes makes them available as nearest-neighbour anchors for
+        cells near the boundary — so streamlines extending past the
+        grid still paint their in-grid portion cleanly up to the edge
+        instead of being dropped and leaving a visible gap.
+        """
+        if self.cx.size < 3:
             return
-        cx = self.cx[mygood]
-        cy = self.cy[mygood]
-        vx_f = self.vx[mygood]
-        vy_f = self.vy[mygood]
-        curv = self.curv[mygood]
-        thalweg = self.thalweg[mygood]
-        chwidth = self.chwidth[mygood]
         genchannel(
             self.b, self.xsiz, self.ysiz, self.chelev, self.zsiz,
-            self.nx, self.ny, self.nz, cx, cy, self.x, self.y,
-            vx_f, vy_f, curv, self.LV_asym, self.lV_height,
+            self.nx, self.ny, self.nz, self.cx, self.cy, self.x, self.y,
+            self.vx, self.vy, self.curv, self.LV_asym, self.lV_height,
             self.ps, self.pavul, self.out, self.totalid, self.facies,
-            self.poro, self.poro0, thalweg, chwidth, self.dwratio,
+            self.poro, self.poro0, self.thalweg, self.chwidth, self.dwratio,
             [1000000000], NNN,
         )
 
@@ -586,23 +585,18 @@ class fluvial:
 
             self.out = 0
             if self.totalid % 10 == 9:
-                mygood = ((self.cx > self.xmin) * (self.cx < self.xmax)
-                          * (self.cy > self.ymin) * (self.cy < self.ymax))
-                mygood = mygood.astype(bool)
-                cx = self.cx[mygood]
-                cy = self.cy[mygood]
-                vx_f = self.vx[mygood]
-                vy_f = self.vy[mygood]
-                curv = self.curv[mygood]
-                thalweg = self.thalweg[mygood]
-                chwidth = self.chwidth[mygood]
+                # Pass the full streamline; genchannel's find_near_grid
+                # clips to the grid, and keeping out-of-grid nodes lets
+                # cells near the boundary still pick them as nearest
+                # neighbours so no gap forms before the edge.
                 genchannel(
                     self.b, self.xsiz, self.ysiz, self.chelev, self.zsiz,
-                    self.nx, self.ny, self.nz, cx, cy, self.x, self.y,
-                    vx_f, vy_f, curv, self.LV_asym, self.lV_height,
+                    self.nx, self.ny, self.nz, self.cx, self.cy,
+                    self.x, self.y,
+                    self.vx, self.vy, self.curv, self.LV_asym, self.lV_height,
                     self.ps, self.pavul, self.out, self.totalid, self.facies,
-                    self.poro, self.poro0, thalweg, chwidth, self.dwratio,
-                    [1000000000], NNN,
+                    self.poro, self.poro0, self.thalweg, self.chwidth,
+                    self.dwratio, [1000000000], NNN,
                 )
 
             self.cx = self.cx[idxx.astype(bool)]

@@ -72,6 +72,37 @@ def test_delta_fan_spreads_in_y():
         f"got prox={prox_y_span}, dist={dist_y_span}")
 
 
+def test_delta_azimuth_rotates_fan():
+    """At azimuth=90°, the fan should progradate in -y (toward low y)
+    instead of +x. Compare the X-centroid and Y-centroid of the active
+    cells for az=0 vs az=90 to confirm the rotation direction.
+    """
+    def centroids(az):
+        np.random.seed(0)
+        layer = _make_layer()
+        layer.create_geology(feeder_width=50, azimuth=az)
+        a = layer.active
+        total = a.sum()
+        if total == 0:
+            return 0.0, 0.0
+        xs = np.arange(a.shape[0])
+        ys = np.arange(a.shape[1])
+        cx = (a.sum(axis=(1, 2)) * xs).sum() / total
+        cy = (a.sum(axis=(0, 2)) * ys).sum() / total
+        return float(cx), float(cy)
+
+    cx0, cy0 = centroids(0.0)
+    cx90, cy90 = centroids(90.0)
+    ny = 48
+    # az=0 fan extends in +x, so at az=90 the fan should point -y,
+    # pulling the Y centroid below the grid midline.
+    assert cy90 < cy0, (
+        f"az=90 should push Y centroid toward low y; "
+        f"got cy0={cy0:.2f}, cy90={cy90:.2f}")
+    assert cy90 < ny / 2, (
+        f"az=90 centroid should be below midline; got cy90={cy90:.2f}")
+
+
 def test_delta_in_reservoir():
     from georules.layers.gaussian import GaussianLayer
     from georules.reservoir import Reservoir

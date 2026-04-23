@@ -31,6 +31,49 @@ from .channel import ChannelLayerBase
 from ._genchannel import genchannel
 
 
+def _entry_and_axis_from_azimuth(az_rad, x_len, y_len):
+    """Resolve the feeder entry, flow direction and traversal length.
+
+    The azimuth uses the compass convention specified in ``azimuth.jpg``:
+    a CW angle measured from +x so that the flow direction is
+        (cos(az), -sin(az))
+    i.e. 0°=+x, 45°=+x/−y, 90°=−y, 135°=−x/−y, 180°=−x, 225°=−x/+y,
+    270°=+y, 315°=+x/+y.
+
+    The feeder enters on the grid boundary opposite the flow direction
+    (ray from the grid centre cast backwards along −flow) and the
+    distributary fan opens in the forward flow direction.  ``t_fwd``
+    is the distance from the entry to the opposite boundary measured
+    along the flow direction; the apex is placed at
+    ``apex_x_fraction * t_fwd`` along this axis.
+
+    Returns
+    -------
+    (entry_x, entry_y), (fx, fy), t_fwd
+    """
+    fx = float(np.cos(az_rad))
+    fy = -float(np.sin(az_rad))
+    cx, cy = 0.5 * x_len, 0.5 * y_len
+
+    def _boundary_t(sx, sy, dx, dy):
+        ts = []
+        if dx > 1e-12:
+            ts.append((x_len - sx) / dx)
+        elif dx < -1e-12:
+            ts.append((0.0 - sx) / dx)
+        if dy > 1e-12:
+            ts.append((y_len - sy) / dy)
+        elif dy < -1e-12:
+            ts.append((0.0 - sy) / dy)
+        return min(t for t in ts if t > 1e-9)
+
+    t_back = _boundary_t(cx, cy, -fx, -fy)
+    entry_x = cx - t_back * fx
+    entry_y = cy - t_back * fy
+    t_fwd = _boundary_t(entry_x, entry_y, fx, fy)
+    return (entry_x, entry_y), (fx, fy), t_fwd
+
+
 def _perturbed_centerline(x0, y0, heading, length, n_nodes,
                           meander_amp=0.04, rng=None):
     """Straight segment from (x0, y0) with heading + small sinusoidal wiggle.
@@ -57,7 +100,8 @@ def _build_distributary_tree(apex_x, apex_y, fan_angle_rad,
                              feeder_width, step_len,
                              length_taper=0.85, width_taper=0.72,
                              meander_amp=0.04,
-                             children_per_split=(3, 5), rng=None):
+                             children_per_split=(3, 5),
+                             fan_asymmetry=0.0, flow_angle=0.0, rng=None):
     """N-ary distributary tree anchored at ``(apex_x, apex_y)``.
 
     Returns a list of segment dicts:
@@ -65,15 +109,21 @@ def _build_distributary_tree(apex_x, apex_y, fan_angle_rad,
          'width': float, 'heading_end': float, 'is_leaf': bool}
 
     Each node splits into ``k`` children (sampled uniformly from
-    ``children_per_split``), with headings distributed evenly across
+    ``children_per_split``), with headings distributed across
     ``subtree_angle`` and split points perturbed perpendicular to the
-    parent heading so siblings emerge from distinct positions.  This
-    produces a dense multi-channel net filling the fan rather than a
-    sparse binary tree with visible gaps between branches.
+    parent heading so siblings emerge from distinct positions.
+
+    ``fan_asymmetry`` ∈ [-1, 1] skews the fan:
+      * 0   → symmetric (children spread equally to ±y of the parent
+              heading),
+      * +1  → angular spread on the +y side is tripled while the -y
+              side is compressed, and the root heading tilts toward +y,
+      * -1  → mirror image toward -y.
     """
     if rng is None:
         rng = np.random.default_rng()
     kmin, kmax = int(children_per_split[0]), int(children_per_split[1])
+    a = float(np.clip(fan_asymmetry, -1.0, 1.0))
     segments: list[dict] = []
 
     def recurse(x0, y0, heading, depth_remaining, subtree_angle, length, width):
@@ -90,14 +140,15 @@ def _build_distributary_tree(apex_x, apex_y, fan_angle_rad,
         k = int(rng.integers(kmin, kmax + 1))
         perp_x = -np.sin(heading)
         perp_y = np.cos(heading)
-        # Even angular distribution across subtree_angle.
-        # frac_i ∈ (-0.5, +0.5), spread = 0.9 so leaves stay inside the
-        # parent's subtree sector.
         for i in range(k):
-            frac = (i + 0.5) / k - 0.5
-            frac += rng.uniform(-0.15, 0.15) / k  # small jitter per child
-            child_heading = heading + 0.9 * subtree_angle * frac
-            split_jitter = 1.2 * width * frac
+            frac = (i + 0.5) / k - 0.5                   # ∈ (-0.5, +0.5)
+            frac += rng.uniform(-0.15, 0.15) / k
+            # Asymmetric stretch: scale the +/- sides by (1+a) and
+            # (1-a) so the fan opens wider on one side.
+            side_scale = 1.0 + a if frac >= 0.0 else 1.0 - a
+            skewed = frac * side_scale
+            child_heading = heading + 0.9 * subtree_angle * skewed
+            split_jitter = 1.2 * width * skewed
             sx = xs[-1] + split_jitter * perp_x
             sy = ys[-1] + split_jitter * perp_y
             recurse(
@@ -107,7 +158,11 @@ def _build_distributary_tree(apex_x, apex_y, fan_angle_rad,
                 length * length_taper, width * width_taper,
             )
 
-    recurse(apex_x, apex_y, 0.0, max_depth, fan_angle_rad,
+    # Flow direction sets the base heading; fan_asymmetry tilts it by
+    # up to ±25% of the fan half-angle so an asymmetric fan is not
+    # only stretched but also points off-axis.
+    root_heading = flow_angle + 0.25 * a * fan_angle_rad
+    recurse(apex_x, apex_y, root_heading, max_depth, fan_angle_rad,
             trunk_length, feeder_width)
     return segments
 
@@ -227,6 +282,7 @@ class DeltaLayer(ChannelLayerBase):
     def create_geology(self, feeder_width=60.0, n_generations=8,
                        fan_angle_deg=95.0, bifurcation_depth=4,
                        children_per_split=(3, 5),
+                       fan_asymmetry=0.0, azimuth=0.0,
                        apex_x_fraction=0.25,
                        progradation_fraction=0.0,
                        trunk_length_factor=5.5,
@@ -260,16 +316,46 @@ class DeltaLayer(ChannelLayerBase):
             bifurcation, sampled uniformly per node.  Default (3, 5)
             gives a dense multi-channel fan instead of a sparse binary
             tree.
+        fan_asymmetry : float, ∈ [-1, 1]
+            Controls how lopsided the fan is.  0 = symmetric; +1 tilts
+            the fan heading toward +y and stretches angular spread on
+            that side; -1 is the mirror image.  Field analogues
+            (Wax Lake, Birdfoot, Mahakam) rarely sit exactly at 0, so
+            set e.g. 0.2-0.5 for natural-looking asymmetry.
+        azimuth : float
+            Compass-convention progradation direction in degrees (CW
+            positive in the XY plot), per ``extra/azimuth.jpg``:
+              0°   → +x (feeder enters at x=0,   fan opens to +x)
+              45°  → +x,-y (feeder at x=0,ymax,  fan opens to xmax,y0)
+              90°  → -y   (feeder at ymax,        fan opens to y=0)
+              135° → -x,-y (feeder at xmax,ymax,  fan opens to x0,y0)
+              180° → -x   (feeder at xmax,        fan opens to x=0)
+              225° → -x,+y (feeder at xmax,y0,    fan opens to x0,ymax)
+              270° → +y   (feeder at y=0,         fan opens to y=ymax)
+              315° → +x,+y (feeder at x0,y0,      fan opens to xmax,ymax)
+            The feeder entry point is solved from azimuth + grid
+            dimensions (backward ray-trace from the grid centre along
+            −flow to the boundary); the apex sits at
+            ``apex_x_fraction`` along the flow axis from entry, and
+            the distributary tree is built directly in the flow frame
+            (no post-hoc rotation).
         apex_x_fraction : float
-            Fractional x position of the apex in the *first* generation,
-            relative to ``x_len``.  Default 0.25 puts the apex a quarter
-            of the way in so the feeder occupies the proximal fifth.
+            Fractional distance from the feeder entry to the opposite
+            grid boundary along the flow axis (set by ``azimuth``) at
+            which the apex sits in the *first* generation.  Default
+            0.25 puts the apex a quarter of the way across the grid
+            along the flow direction, so the feeder occupies the
+            proximal quarter and the fan fills the remaining three
+            quarters.  For ``azimuth=0`` this reduces to a fraction of
+            ``x_len``; for ``azimuth=45`` it is a fraction of the
+            grid's flow diagonal.
         progradation_fraction : float
-            Total fractional x distance over which the apex migrates
-            across all ``n_generations``.  Default 0.0 keeps the apex
-            fixed so every generation produces the same-sized fan at
-            the same location (no clinoform).  Set > 0 to enable
-            prograding-apex clinoform architecture.
+            Total fractional traversal distance over which the apex
+            migrates along the flow axis across all ``n_generations``.
+            Default 0.0 keeps the apex fixed (no clinoform).  Set > 0
+            to enable prograding-apex clinoform architecture; the
+            progradation happens along the flow direction, not along
+            +x.
         trunk_length_factor : float
             Root segment length expressed as a multiple of
             ``feeder_width``.  Subsequent levels shrink by
@@ -299,16 +385,30 @@ class DeltaLayer(ChannelLayerBase):
         x_grid = np.linspace(self.dx / 2, self.nx * self.dx - self.dx / 2, self.nx)
         y_grid = np.linspace(self.dy / 2, self.ny * self.dy - self.dy / 2, self.ny)
         x_len = self.nx * self.dx
-        y_mid = 0.5 * self.ny * self.dy
+        y_len = self.ny * self.dy
 
         fan_angle_rad = np.deg2rad(fan_angle_deg)
+        azimuth_rad = np.deg2rad(azimuth)
         trunk_length = trunk_length_factor * feeder_width
         channel_depth = dwratio * feeder_width
         base_chelev = channel_depth + self.dz
 
-        apex_x0 = apex_x_fraction * x_len
-        apex_xN = (apex_x_fraction + progradation_fraction) * x_len
+        # Entry point, flow direction, and entry→exit distance along
+        # the flow axis — all derived from azimuth.  Apex sits at
+        # ``apex_x_fraction * t_fwd`` from the entry along +flow.
+        (entry_x, entry_y), (fx, fy), t_fwd = _entry_and_axis_from_azimuth(
+            azimuth_rad, x_len, y_len,
+        )
+        flow_angle = float(np.arctan2(fy, fx))
+        perp_x, perp_y = -fy, fx  # unit vector perpendicular to flow (CCW 90°)
+
+        apex_x0 = entry_x + apex_x_fraction * t_fwd * fx
+        apex_y0 = entry_y + apex_x_fraction * t_fwd * fy
+        apex_xN = entry_x + (apex_x_fraction + progradation_fraction) * t_fwd * fx
+        apex_yN = entry_y + (apex_x_fraction + progradation_fraction) * t_fwd * fy
         apex_xs = np.linspace(apex_x0, apex_xN, n_generations)
+        apex_ys = np.linspace(apex_y0, apex_yN, n_generations)
+
         chelev_span = max(self.nz * self.dz - 2 * channel_depth - 2 * self.dz,
                           channel_depth)
         chelev_list = base_chelev + np.linspace(0.0, chelev_span, n_generations)
@@ -320,19 +420,25 @@ class DeltaLayer(ChannelLayerBase):
         step_len = 0.5 * (self.dx + self.dy)
 
         for gen in range(n_generations):
-            apex_x = float(apex_xs[gen])
             chelev = float(chelev_list[gen])
-            # Jitter the apex laterally by up to ±10% of the fan's
-            # half-width at depth 0 so successive generations don't
-            # stack onto the exact same Y.
-            apex_y = y_mid + rng.uniform(-0.1, 0.1) * trunk_length
+            # Jitter apex perpendicular to flow so successive
+            # generations don't stack onto the exact same point.
+            apex_jit = rng.uniform(-0.1, 0.1) * trunk_length
+            apex_x = float(apex_xs[gen]) + apex_jit * perp_x
+            apex_y = float(apex_ys[gen]) + apex_jit * perp_y
 
+            # Feeder: small perp-to-flow jitter on the entry, then a
+            # straight(ish) run to the apex.
+            entry_jit = rng.uniform(-0.05, 0.05) * trunk_length
+            feed_x0 = entry_x + entry_jit * perp_x
+            feed_y0 = entry_y + entry_jit * perp_y
+            feeder_length = float(np.hypot(apex_x - feed_x0, apex_y - feed_y0))
+            feeder_heading = float(np.arctan2(apex_y - feed_y0, apex_x - feed_x0))
             feeder_xs, feeder_ys = _perturbed_centerline(
-                x0=max(self.dx, 0.5 * self.dx),
-                y0=y_mid + rng.uniform(-0.05, 0.05) * y_mid,
-                heading=np.arctan2(apex_y - y_mid, apex_x - 0.5 * self.dx),
-                length=np.hypot(apex_x - 0.5 * self.dx, apex_y - y_mid),
-                n_nodes=max(40, int(apex_x / step_len)),
+                x0=feed_x0, y0=feed_y0,
+                heading=feeder_heading,
+                length=max(feeder_length, step_len),
+                n_nodes=max(40, int(feeder_length / step_len)),
                 meander_amp=meander_amp * 0.6, rng=rng,
             )
             _stamp_centerline(
@@ -352,6 +458,8 @@ class DeltaLayer(ChannelLayerBase):
                 width_taper=width_taper,
                 meander_amp=meander_amp,
                 children_per_split=children_per_split,
+                fan_asymmetry=fan_asymmetry,
+                flow_angle=flow_angle,
                 rng=rng,
             )
             for seg in segments:

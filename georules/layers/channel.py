@@ -5,18 +5,45 @@ from .base import Layer
 __all__ = ["ChannelLayerBase", "MeanderingChannelLayer", "BraidedChannelLayer"]
 
 
+def _rotate_xy_to_azimuth(arr, azimuth_deg):
+    """Rotate a (nx, ny, nz) array in the XY plane to a compass azimuth.
+
+    The fluvial streamline engine always flows along +x.  To point the
+    channel belt along ``azimuth_deg`` using the same compass
+    convention as ``DeltaLayer`` (0°=+x, 45°=+x,-y, 90°=-y, 135°=-x,-y,
+    180°=-x, 225°=-x,+y, 270°=+y, 315°=+x,+y — CW from +x per
+    ``extra/azimuth.jpg``), we rotate the output's XY plane by
+    ``-azimuth_deg`` (scipy uses CCW-positive convention).
+
+    ``order=0`` (nearest-neighbour) preserves integer facies values
+    and keeps facies/poro aligned after resampling.  Cells outside
+    the rotated support are filled with 0 (inactive/shale).
+    """
+    if float(azimuth_deg) % 360.0 == 0.0:
+        return arr
+    from scipy.ndimage import rotate
+    return rotate(arr, -float(azimuth_deg), axes=(0, 1),
+                  reshape=False, order=0, mode='constant', cval=0.0)
+
+
 class ChannelLayerBase(Layer):
     """Base class for channel-type geological layers."""
 
-    def _finalize_properties(self, engine_poro, engine_facies, poro_ave):
+    def _finalize_properties(self, engine_poro, engine_facies, poro_ave,
+                             azimuth=0.0):
         """Convert engine output arrays into standard Layer properties.
 
         Shared by all channel subclasses to ensure consistent
-        poro_mat, facies, active, perm_mat derivation.
+        poro_mat, facies, active, perm_mat derivation.  When
+        ``azimuth != 0``, rotates the XY plane of the engine output so
+        the channel belt points along the requested compass azimuth
+        (same convention as ``DeltaLayer``).
         """
+        poro_rot = _rotate_xy_to_azimuth(engine_poro, azimuth)
+        facies_rot = _rotate_xy_to_azimuth(engine_facies, azimuth)
         self.poro_ave = poro_ave
-        self.poro_mat = engine_poro
-        self.facies = engine_facies.astype(int)
+        self.poro_mat = poro_rot
+        self.facies = facies_rot.astype(int)
         self.active = (self.facies > 0).astype(int)
         self.perm_mat = 10.0 * np.exp(20.0 * self.poro_mat) * self.active
 
@@ -31,7 +58,8 @@ class MeanderingChannelLayer(ChannelLayerBase):
                        migration_distance_ratio=1.0, boundary_reflect=True,
                        aggradation_mode='discrete', nlevel=6,
                        level_reseed_prob=0.6, level_jump_ratio=1.0,
-                       prob_avul_inside=0.0, prob_avul_outside=0.0):
+                       prob_avul_inside=0.0, prob_avul_outside=0.0,
+                       azimuth=0.0):
         """Generate meandering channel geology.
 
         Parameters
@@ -113,6 +141,19 @@ class MeanderingChannelLayer(ChannelLayerBase):
         prob_avul_outside : float
             Per-iteration probability of fully reseeding the streamline
             at a random Y.  Default 0.
+        azimuth : float
+            Compass-convention flow direction of the channel belt in
+            degrees (CW from +x, per ``extra/azimuth.jpg`` — same
+            convention as ``DeltaLayer``):
+              0°   → +x (default, native engine direction)
+              45°  → +x,-y    90°  → -y       135° → -x,-y
+              180° → -x       225° → -x,+y    270° → +y
+              315° → +x,+y
+            Implemented as a nearest-neighbour XY rotation of the
+            engine's 3D output, so channel physics (migration,
+            avulsion, aggradation) are unchanged — only the belt
+            heading changes.  Cells outside the rotated support are
+            marked inactive.
         """
         from ._fluvial import fluvial
 
@@ -133,7 +174,8 @@ class MeanderingChannelLayer(ChannelLayerBase):
             prob_avul_outside=prob_avul_outside,
         )
         engine.simulation(nchannel=n_channels)
-        self._finalize_properties(engine.poro, engine.facies, poro_ave)
+        self._finalize_properties(engine.poro, engine.facies, poro_ave,
+                                  azimuth=azimuth)
 
 
 class BraidedChannelLayer(MeanderingChannelLayer):
@@ -161,7 +203,7 @@ class BraidedChannelLayer(MeanderingChannelLayer):
                        level_jump_ratio=0.5,
                        slope=0.008, discharge=0.9,
                        amplitude=10.0, friction_coeff=0.0009,
-                       poro_ave=0.3,
+                       poro_ave=0.3, azimuth=0.0,
                        n_threads=None, thread_width=None,
                        bar_poro_factor=None):
         """Generate braided channel geology.
@@ -209,6 +251,12 @@ class BraidedChannelLayer(MeanderingChannelLayer):
             Sun-1996 flow parameters.
         poro_ave : float
             Reference porosity for channel fill (default 0.3).
+        azimuth : float
+            Compass-convention flow direction in degrees (CW from +x,
+            per ``extra/azimuth.jpg``).  Forwarded to
+            ``MeanderingChannelLayer.create_geology``; see its
+            docstring for the full azimuth → entry/flow mapping.
+            Default 0 (native +x-flowing engine).
         n_threads, thread_width, bar_poro_factor :
             Deprecated — no-ops retained for API backwards compatibility
             with the old BBC engine.  Ignored.
@@ -237,5 +285,6 @@ class BraidedChannelLayer(MeanderingChannelLayer):
             level_jump_ratio=level_jump_ratio,
             prob_avul_inside=prob_avul_inside,
             prob_avul_outside=prob_avul_outside,
+            azimuth=azimuth,
         )
 
