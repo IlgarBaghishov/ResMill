@@ -172,16 +172,12 @@ def _stamp_centerline(xs, ys, width, chelev, nx, ny, nz,
                       dwratio, poro0, facies, poro):
     """Rasterise a single centerline into ``facies``/``poro`` via genchannel.
 
-    Computes tangents (vx, vy), curvature and thalweg asymmetry from
-    the centerline; all other genchannel inputs carry no-op defaults.
+    ``dwratio`` is the user-facing **depth/full_width** ratio (matches
+    Alluvsim's ``CHdwratio`` semantic). Convert to genchannel's internal
+    ``depth/halfwidth`` ratio via ``gr_dwratio = 2 * dwratio`` (item 1.19).
 
-    The centerline is passed through as-is, including nodes that fall
-    outside the grid.  ``genchannel``'s ``find_near_grid`` already clips
-    the stamp region to valid grid cells, and keeping the out-of-grid
-    nodes makes them available as nearest-neighbour anchors for cells
-    near the boundary — so channels extending past the grid still paint
-    their in-grid portion cleanly up to the edge instead of being
-    dropped (the old 20-node minimum) and leaving a visible gap.
+    Half-width passed to genchannel is ``width / 2`` (``width`` is the
+    full channel width).
     """
     if xs.size < 3:
         return
@@ -198,14 +194,21 @@ def _stamp_centerline(xs, ys, width, chelev, nx, ny, nz,
     max_abs = float(np.abs(curv).max()) + 1e-9
     thalweg = 0.5 + 0.25 * (curv / max_abs)
     thalweg = np.clip(thalweg, 0.05, 0.95)
-    chwidth = width * np.ones_like(cx)
+    halfwidth = 0.5 * width
+    chwidth = halfwidth * np.ones_like(cx)
+    gr_dwratio = 2.0 * dwratio  # convert AL-semantic to genchannel's depth/halfwidth
+    chelev_arr = np.full(cx.size, float(chelev), dtype=np.float64)
+    # merge_overlap=True so sibling distributaries whose centerlines cross
+    # in the same XY slice merge into one connected body at the intersection.
     genchannel(
-        width, xsiz, ysiz, chelev, zsiz,
+        halfwidth, xsiz, ysiz, chelev_arr, zsiz,
         nx, ny, nz, cx, cy, x_grid, y_grid,
         vx, vy, curv, 0.9, 5.0 * zsiz,
         1, 0, 0, 0, facies, poro, poro0,
-        thalweg, chwidth, dwratio,
+        thalweg, chwidth, gr_dwratio,
         [1_000_000_000], 8_000,
+        xmn=float(x_grid[0]), ymn=float(y_grid[0]),
+        merge_overlap=True,
     )
 
 

@@ -1,132 +1,116 @@
+"""Smoke tests for the rewritten Alluvsim-faithful channel engine.
+
+Validates basic shape/dtype/range invariants on the public output arrays
+across both ``MeanderingChannelLayer`` and ``BraidedChannelLayer`` for
+binary and full-Alluvsim output modes. Statistical/visual parity vs the
+Alluvsim binary lives in ``test_alluvsim_parity.py``.
+"""
 import numpy as np
 import pytest
-from georules.layers.channel import MeanderingChannelLayer, BraidedChannelLayer, ChannelLayerBase
+
+from georules.layers.channel import (
+    MeanderingChannelLayer, BraidedChannelLayer,
+    PV_SHOESTRING, CB_JIGSAW,
+)
 
 
-# === Existing tests (unchanged logic) ===
+# Common small grid for fast iteration
+GRID = dict(nx=64, ny=32, nz=16, x_len=640, y_len=320, z_len=8, top_depth=1000)
+
+
+# === Public output shape & invariants ===
 
 def test_channel_shapes():
-    layer = MeanderingChannelLayer(nx=64, ny=32, nz=16, x_len=1024, y_len=512, z_len=48, top_depth=1000)
-    layer.create_geology(channel_width=40, n_channels=3)
-    assert layer.poro_mat.shape == (64, 32, 16)
-    assert layer.perm_mat.shape == (64, 32, 16)
-    assert layer.active.shape == (64, 32, 16)
-
-
-def test_channel_has_nonzero_facies():
-    layer = MeanderingChannelLayer(nx=64, ny=32, nz=16, x_len=1024, y_len=512, z_len=48, top_depth=1000)
-    layer.create_geology(channel_width=40, n_channels=5)
-    assert layer.facies.max() > 0, "Channel model should produce at least some channel facies"
-
-
-def test_channel_poro_in_bounds():
-    layer = MeanderingChannelLayer(nx=64, ny=32, nz=16, x_len=1024, y_len=512, z_len=48, top_depth=1000)
-    layer.create_geology(channel_width=40, n_channels=3)
-    assert np.all(layer.poro_mat >= 0)
-    assert np.all(layer.poro_mat <= 1)
-
-
-def test_meandering_explicit_name():
-    layer = MeanderingChannelLayer(
-        nx=64, ny=32, nz=16, x_len=1024, y_len=512, z_len=48, top_depth=1000
-    )
-    layer.create_geology(channel_width=40, n_channels=3)
-    assert layer.poro_mat.shape == (64, 32, 16)
-    assert layer.facies.max() > 0
-
-
-def test_base_class_not_directly_usable():
-    """ChannelLayerBase.create_geology should raise NotImplementedError."""
-    base = ChannelLayerBase(nx=4, ny=4, nz=4, x_len=100, y_len=100,
-                            z_len=10, top_depth=500)
-    with pytest.raises(NotImplementedError):
-        base.create_geology()
-
-
-# === Braided channel tests (fluvial engine + avulsion) ===
-
-def test_braided_shapes():
-    layer = BraidedChannelLayer(
-        nx=64, ny=32, nz=16, x_len=1024, y_len=512, z_len=48, top_depth=1000
-    )
-    layer.create_geology(braidplain_width=80, n_channels=4)
+    layer = MeanderingChannelLayer(**GRID)
+    layer.create_geology(seed=0)
     assert layer.poro_mat.shape == (64, 32, 16)
     assert layer.perm_mat.shape == (64, 32, 16)
     assert layer.active.shape == (64, 32, 16)
     assert layer.facies.shape == (64, 32, 16)
 
 
-def test_braided_has_nonzero_facies():
-    layer = BraidedChannelLayer(
-        nx=64, ny=32, nz=16, x_len=1024, y_len=512, z_len=48, top_depth=1000
-    )
-    layer.create_geology(braidplain_width=80, n_channels=5)
-    assert layer.facies.max() > 0
+def test_channel_has_nonzero_facies():
+    layer = MeanderingChannelLayer(**GRID)
+    layer.create_geology(seed=42)
+    assert layer.active.sum() > 0, "engine should produce some sand"
 
 
-def test_braided_poro_in_bounds():
-    layer = BraidedChannelLayer(
-        nx=64, ny=32, nz=16, x_len=1024, y_len=512, z_len=48, top_depth=1000
-    )
-    layer.create_geology(braidplain_width=80, n_channels=3)
-    assert np.all(layer.poro_mat >= 0)
-    assert np.all(layer.poro_mat <= 1)
+def test_channel_poro_in_bounds():
+    layer = MeanderingChannelLayer(**GRID)
+    layer.create_geology(seed=1)
+    assert (layer.poro_mat >= 0).all()
+    assert (layer.poro_mat <= 1).all()
 
 
-def test_braided_active_matches_facies():
-    layer = BraidedChannelLayer(
-        nx=64, ny=32, nz=16, x_len=1024, y_len=512, z_len=48, top_depth=1000
-    )
-    layer.create_geology(braidplain_width=80, n_channels=3)
-    expected_active = (layer.facies > 0).astype(int)
-    np.testing.assert_array_equal(layer.active, expected_active)
+def test_channel_perm_positive_where_active():
+    layer = MeanderingChannelLayer(**GRID)
+    layer.create_geology(seed=2)
+    assert (layer.perm_mat[layer.active == 1] > 0).all()
 
 
-def test_braided_perm_positive_where_active():
-    layer = BraidedChannelLayer(
-        nx=64, ny=32, nz=16, x_len=1024, y_len=512, z_len=48, top_depth=1000
-    )
-    layer.create_geology(braidplain_width=80, n_channels=3)
-    active_perm = layer.perm_mat[layer.active == 1]
-    assert np.all(active_perm > 0)
+# === Output mode (binary vs alluvsim) ===
+
+def test_binary_mode_default():
+    layer = MeanderingChannelLayer(**GRID)
+    layer.create_geology(seed=3)
+    # Default should be binary 0/1
+    assert set(np.unique(layer.facies)).issubset({0, 1})
+    # The 6-class array is always populated
+    assert hasattr(layer, "facies_alluvsim")
+    assert set(np.unique(layer.facies_alluvsim)).issubset({-1, 0, 1, 2, 3, 4})
 
 
-def test_braided_in_reservoir():
-    """BraidedChannelLayer should be stackable in a Reservoir."""
+def test_alluvsim_mode_full_codes():
+    layer = MeanderingChannelLayer(**GRID)
+    layer.create_geology(seed=4, output_facies="alluvsim",
+                         **{**PV_SHOESTRING, "mCSnum": 1.0, "stdevCSnum": 0.5,
+                            "mCSnumlobe": 1.0, "stdevCSnumlobe": 0.5})
+    codes = set(np.unique(layer.facies))
+    # Should at minimum produce FF, CH, LA, LV (CS only with mCSnum>0)
+    assert -1 in codes  # FF
+    assert 4 in codes   # CH
+    # active is the binary collapse
+    assert ((layer.active == (layer.facies >= 1).astype(np.int8))).all()
+
+
+def test_invalid_output_mode_raises():
+    layer = MeanderingChannelLayer(**GRID)
+    with pytest.raises(ValueError, match="output_facies"):
+        layer.create_geology(seed=0, output_facies="wat")
+
+
+# === Preset constants ===
+
+def test_pv_shoestring_preset():
+    layer = MeanderingChannelLayer(**GRID)
+    layer.create_geology(seed=0, **PV_SHOESTRING)
+    # PV-shoestring is low-NTG; sand fraction should be modest
+    ntg = float(layer.active.mean())
+    assert 0.01 < ntg < 0.30
+
+
+def test_cb_jigsaw_preset_via_braided():
+    layer = BraidedChannelLayer(**GRID)
+    layer.create_geology(seed=0)  # uses CB_JIGSAW defaults
+    ntg = float(layer.active.mean())
+    # CB-jigsaw is moderate-NTG; should hit > pv_shoestring
+    assert ntg > 0.05
+
+
+# === Reservoir composition (DeltaLayer back-compat sanity) ===
+
+def test_reservoir_stacking_with_channel():
     from georules.layers.gaussian import GaussianLayer
     from georules.reservoir import Reservoir
 
-    g = GaussianLayer(nx=64, ny=32, nz=8, x_len=1024, y_len=512,
-                      z_len=24, top_depth=1000)
+    g = GaussianLayer(nx=64, ny=32, nz=8, x_len=640, y_len=320,
+                      z_len=4, top_depth=1000)
     g.create_geology(poro_ave=0.2, perm_ave=1.5, poro_std=0.03,
                      perm_std=0.5, ntg=0.7)
 
-    b = BraidedChannelLayer(nx=64, ny=32, nz=8, x_len=1024, y_len=512,
-                            z_len=24, top_depth=1024)
-    b.create_geology(braidplain_width=80, n_channels=3)
+    c = MeanderingChannelLayer(nx=64, ny=32, nz=8, x_len=640, y_len=320,
+                                z_len=4, top_depth=1004)
+    c.create_geology(seed=0)
 
-    res = Reservoir([g, b])
+    res = Reservoir([g, c])
     assert res.poro_mat.shape == (64, 32, 16)
-
-
-def test_braided_deprecated_kwargs_are_ignored():
-    """Old BBC-engine kwargs (n_threads, thread_width, bar_poro_factor)
-    should still be accepted silently for backwards compatibility."""
-    layer = BraidedChannelLayer(
-        nx=64, ny=32, nz=16, x_len=1024, y_len=512, z_len=48, top_depth=1000
-    )
-    layer.create_geology(braidplain_width=80, n_channels=3,
-                          n_threads=3, thread_width=30.0,
-                          bar_poro_factor=0.7)
-    assert layer.active.shape == (64, 32, 16)
-
-
-def test_meandering_accepts_avulsion_kwargs():
-    """In-model avulsion kwargs should flow through MeanderingChannelLayer."""
-    np.random.seed(0)
-    layer = MeanderingChannelLayer(
-        nx=64, ny=32, nz=16, x_len=1024, y_len=512, z_len=48, top_depth=1000
-    )
-    layer.create_geology(channel_width=40, n_channels=3,
-                          prob_avul_inside=0.3, prob_avul_outside=0.1)
-    assert layer.facies.max() > 0

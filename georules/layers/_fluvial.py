@@ -1,292 +1,770 @@
-"""Fluvial channel simulation engine (private module).
+"""Fluvial channel simulation engine — port of Alluvsim's ``streamsim.for``.
 
-Ported from legacy channel_model/fluvial_3d.py with import fixes.
-All physics preserved unchanged.
+The driver is :py:class:`fluvial`, whose ``simulation()`` method ports the
+per-event loop in ``streamsim.for:737-1004``. Per aggradation level we
+draw an initial streamline, then loop events until the level NTG target is
+met (or ``ntime`` is exhausted). Each event is one of:
+
+* **Avulsion-outside** — abandon current streamline, draw fresh one from
+  the candidate pool (``streamsim.for:757-774``).
+* **Avulsion-inside** — abandon current streamline, splice a new tail from
+  a curvature-weighted node (``avulsioninside.for``).
+* **Migration** — stamp LA on OLD path, redraw geometry, run one bank-retreat
+  step (``calcusb.for``: explicit 30-node Sun-1996 integral with
+  ``exp(-2 Cf ds / h0)`` decay), neck-cut, then stamp CH on NEW path.
+
+Conventions inside the engine match Alluvsim:
+
+* Angles in **compass degrees** (0=+y, 90=+x, increasing CW). The AR(2)
+  walk uses math-degree angles internally (``ang = 450 - chazi``) so
+  ``x += step*cosd(ang); y += step*sind(ang)`` reproduces the channel
+  azimuth without conversion gymnastics.
+* Curvature is ``dazi/ds`` in deg/m, **compass-CW positive** (right turn
+  = positive). The thalweg, splay-side, and levee-cutbank tests are all
+  written against this sign convention so they match ``calc_levee.for``,
+  ``streamsim.for:907-911`` and ``calc_lobe.for`` directly.
 """
+from __future__ import annotations
+
 import numpy as np
-from scipy.interpolate import UnivariateSpline
-import scipy.signal
-from scipy.ndimage import gaussian_filter
+from scipy.interpolate import CubicSpline
 
 from ._genchannel import genchannel
+from ._genabandoned import paint_abandoned
+from ._calc_levee import paint_levee
+from ._calc_lobe_splay import paint_lobe, paint_splay
 from ._make_cutoff import make_cutoff
 
 
+# ---------------------------------------------------------------------------
+# Alluvsim facies codes
+# ---------------------------------------------------------------------------
+FF, FFCH, CS, LV, LA, CH = -1, 0, 1, 2, 3, 4
+
+
+def _gauss_clip(mean: float, stdev: float, lo: float = 0.0, hi: float | None = None) -> float:
+    """One Gaussian draw, clipped — matches Alluvsim's per-event ``max(0,...)`` idiom."""
+    val = float(np.random.normal(mean, stdev)) if stdev > 0 else float(mean)
+    val = max(val, lo)
+    if hi is not None:
+        val = min(val, hi)
+    return val
+
+
+def _movwinsmooth(arr: np.ndarray, nwin: int) -> np.ndarray:
+    """Triangular moving-window smoother (port of Alluvsim ``movwinsmooth.for``).
+
+    Weights ``w[i] = (nwin - |i| + 1) / (nwin + 1)`` for ``|i| <= nwin``,
+    normalised per evaluation point so edge handling matches Alluvsim's
+    ``count``-based renormalisation.
+    """
+    n = arr.size
+    if n == 0 or nwin <= 0:
+        return arr.copy()
+    out = np.empty_like(arr, dtype=np.float64)
+    weights = np.array(
+        [(nwin - abs(i) + 1) / (nwin + 1.0) for i in range(-nwin, nwin + 1)],
+        dtype=np.float64,
+    )
+    for i in range(n):
+        lo = max(0, i - nwin)
+        hi = min(n, i + nwin + 1)
+        wlo = lo - (i - nwin)
+        whi = wlo + (hi - lo)
+        w = weights[wlo:whi]
+        out[i] = float((arr[lo:hi] * w).sum() / w.sum())
+    return out
+
+
 class fluvial:
-    # facies: 0 shale; 1 pointbar/channel fill; 2 abandon channel; 3 levee; 4 splay
+    """Single-streamline fluvial simulator with Alluvsim-faithful event loop."""
 
-    def __init__(self, station=1/32, complex_wid=500, b=80, Cf=0.0009, A=10.0,
-                 I=0.008, Q=0.9, meander_scale=0.8, dwratio=0.4, nlevel=6, pavul=0,
-                 nx=256, ny=128, nz=64, xmn=8, ymn=8, xsiz=16, ysiz=16, zsiz=3,
-                 rs=69069, ntg=1000, erode=0.1, lsplay=0, msplay=0, hsplay=0,
-                 ntime=10, azi0=0, bankratio=2, myidx=0,
-                 migration_distance_ratio=1.0, boundary_reflect=True,
-                 aggradation_mode='discrete', level_reseed_prob=0.6,
-                 level_jump_ratio=1.0,
-                 prob_avul_inside=0.0, prob_avul_outside=0.0,
-                 azimuth=0.0):
-        self.myidx = myidx
-        self.b = b
-        self.dwratio = dwratio
-        self.LV_asym = 0.9
-        self.lV_height = 5 * zsiz
-        dz = int((self.b * self.dwratio) / zsiz)
-
-        ddd = 7
-        self.aggrad = [
-            dz / ddd / np.random.uniform(3, 4),
-            dz / ddd / np.random.uniform(3, 4),
-            dz / ddd / np.random.uniform(4, 5),
-            dz / ddd / np.random.uniform(5, 6),
-            dz / ddd / np.random.uniform(5, 6),
-            dz / ddd / np.random.uniform(5, 6),
-            dz / ddd / np.random.uniform(7, 8),
-            dz / ddd / np.random.uniform(7, 8),
-            dz / ddd / np.random.uniform(7, 8),
-            dz / ddd / np.random.uniform(8, 9),
-            dz / ddd / np.random.uniform(9, 10),
-            dz / ddd / 10, dz / ddd / 10, dz / ddd / 10,
-        ]
-
-        self.bankratio = bankratio
-        self.poro0 = 0.3
-        self.poro = 0.05 * np.ones((nx, ny, nz))
-        self.splay_dist = b * 4
-        self.trunc_len = 2 * b
-        self.A = A
-        self.Cf = Cf
-        self.I = I
-        self.Q = Q
-        self.azi0 = 0
-        self.meander_scale = meander_scale
-        self.nlevel = nlevel
-        self.pavul = pavul
-        self.nx = nx
-        self.ny = ny
-        self.nz = nz
+    def __init__(
+        self,
+        # ---- grid (required) -------------------------------------------
+        nx: int, ny: int, nz: int,
+        xsiz: float, ysiz: float, zsiz: float,
+        xmn: float = 0.0, ymn: float = 0.0,
+        # ---- aggradation schedule --------------------------------------
+        nlevel: int = 3,
+        level_z: list[float] | None = None,
+        NTGtarget: float = 0.10,
+        ntime: int = 120,
+        # ---- avulsion probabilities ------------------------------------
+        probAvulOutside: float = 0.10,
+        probAvulInside: float = 0.05,
+        # ---- channel geometry (per-event Gaussian draws) ---------------
+        mCHdepth: float = 2.5, stdevCHdepth: float = 0.3, stdevCHdepth2: float = 0.2,
+        mCHwdratio: float = 10.0, stdevCHwdratio: float = 1.0,
+        mCHsinu: float = 1.6, stdevCHsinu: float = 0.15,
+        mCHazi: float = 90.0, stdevCHazi: float = 1.0,
+        mCHsource: float | None = None, stdevCHsource: float = 80.0,
+        # ---- migration --------------------------------------------------
+        mdistMigrate: float = 35.0, stdevdistMigrate: float = 10.0,
+        # ---- levee (LV) — Alluvsim makepar-style defaults --------------
+        mLVdepth: float = 1.0, stdevLVdepth: float = 0.2,
+        mLVwidth: float = 40.0, stdevLVwidth: float = 5.0,
+        mLVheight: float = 0.5, stdevLVheight: float = 0.1,
+        mLVasym: float = 0.3, stdevLVasym: float = 0.1,
+        mLVthin: float = 0.3, stdevLVthin: float = 0.1,
+        # ---- crevasse splay (CS) — makepar defaults --------------------
+        mCSnum: float = 2.0, stdevCSnum: float = 0.5,
+        mCSnumlobe: float = 3.0, stdevCSnumlobe: float = 1.0,
+        mCSsource: float = 50.0, stdevCSsource: float = 20.0,
+        mCSLOLL: float = 200.0, stdevCSLOLL: float = 50.0,
+        mCSLOWW: float = 30.0, stdevCSLOWW: float = 10.0,
+        mCSLOl: float = 100.0, stdevCSLOl: float = 20.0,
+        mCSLOw: float = 20.0, stdevCSLOw: float = 10.0,
+        mCSLO_hwratio: float = 0.03, stdevCSLO_hwratio: float = 0.01,
+        mCSLO_dwratio: float = 0.02, stdevCSLO_dwratio: float = 0.005,
+        # ---- abandoned-channel mud plug (FFCH) -------------------------
+        mFFCHprop: float = 0.0, stdevFFCHprop: float = 0.0,
+        # ---- hydraulic — Alluvsim makepar central values --------------
+        Cf: float = 0.0078, A: float = 2.0, I: float = 0.001, Q: float = 5.0,
+        # ---- pool / discretisation -------------------------------------
+        CHndraw: int = 50, ndiscr: int = 5, nCHcor: int = 10,
+        # ---- back-compat (kept for DeltaLayer-style internal callers) --
+        azimuth: float = 0.0,
+        # ---- misc -------------------------------------------------------
+        seed: int | None = None,
+    ):
+        # Grid
+        self.nx, self.ny, self.nz = nx, ny, nz
+        self.xsiz, self.ysiz, self.zsiz = xsiz, ysiz, zsiz
         self.xmn = xmn
         self.ymn = ymn
-        self.xsiz = xsiz
-        self.ysiz = ysiz
-        self.zsiz = zsiz
-        self.rs = rs
-        self.ntg = ntg
-        self.erode = erode
-        self.lsplay = lsplay
-        self.msplay = msplay
-        self.hsplay = hsplay
-        self.ntime = ntime
-        # Per-step lateral migration scale, expressed as a multiple of
-        # (xsiz+ysiz). Alluvsim draws distMigrate ~ Gaussian(25-50 m) per
-        # step and rescales the bank-velocity field to match. The original
-        # hard-coded value here was 2.5 which, combined with the continuous
-        # aggradation schedule, gave a ~8:1 lateral:vertical ratio and made
-        # channels slither diagonally through Z.
-        self.migration_distance = migration_distance_ratio
-        self.boundary_reflect = boundary_reflect
-        # 'discrete' = Alluvsim-style nlevel aggradation: chelev jumps by one
-        # channel depth at each of `nlevel` level boundaries, stamps emit
-        # only at boundaries, and the streamline is optionally re-seeded
-        # with probability `level_reseed_prob`. Per-Z slices show one crisp
-        # meander each, rather than 80 overlaid migration snapshots.
-        # 'continuous' = legacy: per-iter tiny chelev increments + stamps
-        # every 10 iters. Produces amalgamated channel belt.
-        self.aggradation_mode = aggradation_mode
-        self.level_reseed_prob = level_reseed_prob
-        self.level_jump_ratio = level_jump_ratio
-        # In-model avulsion (Alluvsim avulsioninside.for): pick a node
-        # weighted by |curvature|, truncate the streamline there, and
-        # grow a fresh DP-model branch from that node's azimuth.  Drives
-        # braided architectures when prob_avul_inside is large (~0.5).
-        # Out-of-model avulsion: fully reseed the streamline at a random
-        # Y (~0.1 for braided preset).  Both default 0 for a pure
-        # meandering run.
-        self.prob_avul_inside = prob_avul_inside
-        self.prob_avul_outside = prob_avul_outside
-        # Compass-azimuth flow direction (CW from +x, same convention
-        # as DeltaLayer — see extra/azimuth.jpg).  The engine generates
-        # streamlines natively in its +x frame; at each genchannel
-        # stamp the streamline's (cx, cy) and tangent (vx, vy) are
-        # rotated CW by ``azimuth`` around the grid centre so the
-        # rasterised channels flow along the requested direction.
-        # Curvature is rotation-invariant so no adjustment is needed.
-        self.azimuth_rad = float(np.deg2rad(azimuth))
-        self._cos_az = float(np.cos(self.azimuth_rad))
-        self._sin_az = float(np.sin(self.azimuth_rad))
-        g = 9.8
-        self.g = g
-        self.us0 = ((g * Q * I) / (2.0 * b * Cf))**(1.0 / 3.0)
-        self.h0 = Q / (2.0 * b * self.us0)
         self.xmin = xmn - 0.5 * xsiz
         self.ymin = ymn - 0.5 * ysiz
         self.xmax = self.xmin + xsiz * nx
         self.ymax = self.ymin + ysiz * ny
-        # Rotation pivot for azimuth-aware stamping — centre of the
-        # physical grid.  Precomputed so ``_rotated_stream_coords`` is
-        # a pure arithmetic helper.
+        self.x = np.linspace(xmn, self.xmax - xmn, nx)
+        self.y = np.linspace(ymn, self.ymax - ymn, ny)
+
+        # Aggradation
+        self.nlevel = int(nlevel)
+        if level_z is None:
+            level_z = list(np.linspace(zsiz, nz * zsiz, self.nlevel))
+        self.level_z = [float(z) for z in level_z]
+        if len(self.level_z) != self.nlevel:
+            raise ValueError(
+                f"len(level_z)={len(self.level_z)} != nlevel={self.nlevel}")
+        self.NTGtarget = float(NTGtarget)
+        self.ntime = int(ntime)
+
+        # Avulsion
+        self.probAvulOutside = float(probAvulOutside)
+        self.probAvulInside = float(probAvulInside)
+
+        # Per-event geometry draws
+        self.mCHdepth, self.stdevCHdepth = float(mCHdepth), float(stdevCHdepth)
+        self.stdevCHdepth2 = float(stdevCHdepth2)
+        self.mCHwdratio, self.stdevCHwdratio = float(mCHwdratio), float(stdevCHwdratio)
+        self.mCHsinu, self.stdevCHsinu = float(mCHsinu), float(stdevCHsinu)
+        self.mCHazi, self.stdevCHazi = float(mCHazi), float(stdevCHazi)
+        self.mCHsource = float(mCHsource) if mCHsource is not None else 0.5 * (self.ymin + self.ymax)
+        self.stdevCHsource = float(stdevCHsource)
+        self.mdistMigrate, self.stdevdistMigrate = float(mdistMigrate), float(stdevdistMigrate)
+
+        self.mLVdepth, self.stdevLVdepth = float(mLVdepth), float(stdevLVdepth)
+        self.mLVwidth, self.stdevLVwidth = float(mLVwidth), float(stdevLVwidth)
+        self.mLVheight, self.stdevLVheight = float(mLVheight), float(stdevLVheight)
+        self.mLVasym, self.stdevLVasym = float(mLVasym), float(stdevLVasym)
+        self.mLVthin, self.stdevLVthin = float(mLVthin), float(stdevLVthin)
+
+        self.mCSnum, self.stdevCSnum = float(mCSnum), float(stdevCSnum)
+        self.mCSnumlobe, self.stdevCSnumlobe = float(mCSnumlobe), float(stdevCSnumlobe)
+        self.mCSsource, self.stdevCSsource = float(mCSsource), float(stdevCSsource)
+        self.mCSLOLL, self.stdevCSLOLL = float(mCSLOLL), float(stdevCSLOLL)
+        self.mCSLOWW, self.stdevCSLOWW = float(mCSLOWW), float(stdevCSLOWW)
+        self.mCSLOl, self.stdevCSLOl = float(mCSLOl), float(stdevCSLOl)
+        self.mCSLOw, self.stdevCSLOw = float(mCSLOw), float(stdevCSLOw)
+        self.mCSLO_hwratio, self.stdevCSLO_hwratio = float(mCSLO_hwratio), float(stdevCSLO_hwratio)
+        self.mCSLO_dwratio, self.stdevCSLO_dwratio = float(mCSLO_dwratio), float(stdevCSLO_dwratio)
+
+        self.mFFCHprop, self.stdevFFCHprop = float(mFFCHprop), float(stdevFFCHprop)
+
+        # Hydraulic
+        g = 9.8
+        self.g = g
+        self.Cf, self.A, self.I, self.Q = float(Cf), float(A), float(I), float(Q)
+        self.us0 = ((g * self.Q * self.I) /
+                    (self.mCHdepth * self.mCHwdratio * self.Cf))**(1.0 / 3.0)
+        self.h0 = self.Q / (self.mCHdepth * self.mCHwdratio * self.us0)
+
+        # Pool / discretisation
+        self.CHndraw = int(CHndraw)
+        self.ndiscr = int(ndiscr)
+        self.nCHcor = int(nCHcor)
+
+        # Azimuth (back-compat with delta-style rotated stamping)
+        self.azimuth_rad = float(np.deg2rad(azimuth))
+        self._cos_az = float(np.cos(self.azimuth_rad))
+        self._sin_az = float(np.sin(self.azimuth_rad))
         self._pivot_x = 0.5 * (self.xmin + self.xmax)
         self._pivot_y = 0.5 * (self.ymin + self.ymax)
-        self.station_len = station * self.xmax
-        self.x = np.linspace(xmn, self.xmax - xmn, self.nx)
-        self.y = np.linspace(ymn, self.ymax - ymn, self.ny)
+
+        # Streamline discretisation step. Match Alluvsim ``streamsim.for:593``:
+        # ``step = (xsiz + ysiz) / 2``. ndis0 multiplier matches AL's *2.
         self.step = (self.xsiz + self.ysiz) / 2
-        self.step0 = (self.xsiz + self.ysiz) * 8
-        self.ndis0 = int((((self.xmax - self.xmin) + (self.ymax - self.ymin)) / 2.0) / self.step) * 4
-        self.ndis = self.ndis0
-        self.incr1 = b / 2
-        self.incr2 = b / 4
-        self.nthick = int(b / ((xsiz + ysiz) / 2.0))
-        self.good = np.zeros([self.nx, self.ny])
+        self.step0 = self.step
+        self.ndis0 = int((((self.xmax - self.xmin) + (self.ymax - self.ymin)) / 2.0) / self.step) * 2
 
-    def generate_streamline(self, y0, x0=-1000, k=0.1, s=0.8, h=0.8, m=0):
-        k = k * self.step0
-        phi = np.arcsin(h)
-        b1 = 2.0 * np.exp(-k * h) * np.cos(k * np.cos(phi))
-        b2 = -1.0 * np.exp(-2.0 * k * h)
-        mm0 = s * np.random.normal(0, 1, size=self.ndis0 + 40)
-        mm0 = mm0[20:-20]
-        ar = np.array([1, b1, b2])
-        theta = scipy.signal.lfilter([1], ar, mm0) + m
+        # Counters mutable from numba kernels
+        self.ntg_counter = np.zeros(1, dtype=np.int64)
+        self.ffch_counter = np.zeros(1, dtype=np.int64)
 
-        self.cx0 = np.cumsum(self.step0 * np.cos(theta))
-        self.cx0 += x0
-        self.cy0 = np.cumsum(self.step0 * np.sin(theta))
-        self.cy0 += y0
-        self.cx0 = np.append([x0], self.cx0)
-        self.cy0 = np.append([y0], self.cy0)
+        # Output arrays
+        self.facies = np.full((nx, ny, nz), FF, dtype=np.int8)
+        self.poro = np.zeros((nx, ny, nz), dtype=np.float32)
+        self.poro0 = 0.3
 
-        idx0 = np.arange(self.cx0.size)
-        if self.cx0.size < 20:
-            return 0
-        else:
-            self.ndis00 = idx0[self.cx0 > (self.xmax)][0] + 4
+        if seed is not None:
+            np.random.seed(int(seed))
 
-        self.cx0 = self.cx0[:self.ndis00]
-        self.cy0 = self.cy0[:self.ndis00]
-        self.length = np.zeros(self.cx0.size)
-        self.length[1:] = np.sqrt(
-            (self.cx0[1:] - self.cx0[:-1])**2 + (self.cy0[1:] - self.cy0[:-1])**2
-        )
-        self.length = np.cumsum(self.length)
-        self.splx = UnivariateSpline(self.length, self.cx0, k=5, s=0)
-        self.sply = UnivariateSpline(self.length, self.cy0, k=5, s=0)
+        # Streamline state
+        self.cx = None
+        self.cy = None
+        self.curv = None
+        self.vx = None
+        self.vy = None
+        self.azi = None  # per-node azimuth in compass degrees (matches chamat[:,9])
+        self.thalweg = None
+        self.chelev = self.level_z[0]
+        self.chelev_arr = None  # per-node elevation array (chamat[:,11])
 
-        length = np.linspace(0, self.length[-1], self.cx0.size * 18)
-        self.step = length[1] - length[0]
-        self.cx = self.splx(length)
-        self.cy = self.sply(length)
-        self.ndis = self.cx.size
+        # Per-event channel geometry
+        self.CHdepth = self.mCHdepth
+        self.CHwdratio = self.mCHwdratio
+        self.gr_dwratio = 2.0 / max(self.CHwdratio, 1e-6)  # depth / half-width
+        self.CHhalfwidth = 0.5 * self.CHdepth * self.CHwdratio
+        self.maxCHhalfwidth = self.CHhalfwidth
 
-        self.myinit = 10
-        if (np.sum(self.cy > self.ymax - self.ny / 2.5 * self.ysiz * (1 - self.chelev / self.nz / self.zsiz))
-                + np.sum(self.cy < self.ymin + self.ny / 2.5 * self.ysiz * (1 - self.chelev / self.nz / self.zsiz))) > 0:
-            return 0
-        else:
-            self.x0 = self.cx[0]
-            self.y0 = self.cy[0]
-            self.x1 = self.cx[-1]
-            self.y1 = self.cy[-1]
-            return 1
+        # Per-streamline width perturbation (onedrf)
+        self._chwidth_arr = None  # cached per-node halfwidth (chamat[:,5])
+        self._chwidth_state_n = -1
 
-    def cal_curv(self, zzz=0):
-        dlength = np.sqrt((self.cx[1:] - self.cx[:-1])**2 + (self.cy[1:] - self.cy[:-1])**2)
-        dlength = np.append(0, dlength)
-        self.dlength = dlength
-        length = np.cumsum(dlength)
-        s10 = UnivariateSpline(length, self.cx, k=3, s=0)
-        s20 = UnivariateSpline(length, self.cy, k=3, s=0)
-        nstep = int((length[-1] - length[0]) / self.step) + 1
-        self.length = np.linspace(length[0], length[-1] - 0.1, nstep)
+        # Bookkeeping (back-compat)
+        self.LV_asym = 0.9
+        self.lV_height = 5 * zsiz
+        self.totalid = 0
+        self.out = 0
+        self.ps = 1
+        self.pavul = 0
 
-        self.cx = s10(self.length)
-        self.cy = s20(self.length)
-        zz = 0.2
-        self.cx[1:-1] = self.cx[1:-1] * (1 - zz) + zz / 2 * self.cx[:-2] + zz / 2 * self.cx[2:]
-        self.cy[1:-1] = self.cy[1:-1] * (1 - zz) + zz / 2 * self.cy[:-2] + zz / 2 * self.cy[2:]
+        # First-streamline-of-sim flag (Alluvsim ``CHcurrent.gt.1`` guard).
+        self._is_first_streamline = True
 
-        s1 = UnivariateSpline(self.length, self.cx, k=5, s=4000)
-        s2 = UnivariateSpline(self.length, self.cy, k=5, s=4000)
+        # Streamline candidate pool (Alluvsim ``buildCHtable``)
+        self._pool = None  # list of dicts {cx, cy, ndis, chazi, chsinu, chdepth, chwidth_arr, weight}
 
-        if zzz == 0:
-            self.cx = s10(self.length)
-            self.cy = s20(self.length)
-        self.splx = s1
-        self.sply = s2
+    # ----------------------------------------------------------------- AR(2) walk
 
-        self.chwidth = self.b * np.ones(len(self.length))
-        self.ndis = len(self.length)
+    @staticmethod
+    def _resc(s1, s2, t1, t2, x):
+        """Linear rescale ``x in [s1,s2] → [t1,t2]`` (Alluvsim ``resc``)."""
+        if s2 == s1:
+            return t1
+        return t1 + (t2 - t1) * (x - s1) / (s2 - s1)
 
-        vx = s1.derivative(n=1)
-        ax = s1.derivative(n=2)
-        vy = s2.derivative(n=1)
-        ay = s2.derivative(n=2)
-        curvature = (
-            (vx(self.length) * ay(self.length) - ax(self.length) * vy(self.length))
-            / ((vx(self.length)**2 + vy(self.length)**2)**1.5)
-        )
-        self.curv = curvature
+    def _ar2_walk(self, x0: float, y0: float, chazi: float, chsinu: float,
+                  ndis_max: int, max_attempts: int = 1000):
+        """Disturbed-periodic (Pyrcz/Sun) AR(2) walk in **compass degrees**.
 
-        maxcurvr = max(self.curv) + 0.0001
-        maxcurvl = max(-self.curv) + 0.0001
-        self.thalweg = self.curv.copy()
-        self.thalweg[self.curv >= 0] = 0.5 + self.curv[self.curv >= 0] * 0.25 / maxcurvr
-        self.thalweg[self.curv < 0] = 0.5 + self.curv[self.curv < 0] * 0.25 / maxcurvl
-        dcsids = (self.curv[1:] - self.curv[:-1]) / (self.length[1:] - self.length[:-1])
-        self.dcsids = np.append(dcsids[0], dcsids)
+        Faithful port of Alluvsim ``buildCHtable.for:70-128``:
+          ``k=0.3, h=0.8``
+          ``b1 = 2 exp(-kh) cosd(k cosd(asind(h)))``
+          ``b2 = -exp(-2kh)``
+          ``m = (450 - chazi)*16.33/360``  (math-degree restoring force)
+          ``s = resc(1.0, 2.0, 1.0, 13.0, chsinu)``  (deg/step)
+          ``ang1 = ang2 = 450 - chazi``
+          ``ang = b1*ang1 + b2*ang2 + (xp*s + m)``
+          ``x += step*cosd(ang); y += step*sind(ang)``
 
-        self.dlength = self.step
-        self.vx = vx(self.length)
-        self.vy = vy(self.length)
+        Restarts noise if the walk leaves the grid in the first ``ndis0/10``
+        nodes (matches AL's ``goto 512`` regen-on-short-failure).
 
-    def find_nearest(self, array, value):
-        idx = (np.abs(array - value)).argmin()
-        return idx
-
-    def _reseed_streamline(self, s_noise, random_y=False):
-        """Draw a new streamline from scratch.
-
-        ``random_y=True`` picks a fresh random Y within the interior band
-        (used between aggradation levels in discrete mode).  Otherwise the
-        new Y is either a reflection of the current channel's tail across
-        the mid-Y (``boundary_reflect=True``, preserves Z-continuity
-        after a touch_b event) or simply the mid-Y.
+        Returns ``(cx, cy)`` arrays of length ``>= ndis0/10`` on success, or
+        (None, None) after ``max_attempts`` failed regenerations.
         """
-        ymid = 0.5 * (self.ymin + self.ymax)
-        if random_y:
-            margin = 0.25 * (self.ymax - self.ymin)
-            chy = float(np.random.uniform(self.ymin + margin,
-                                          self.ymax - margin))
-        elif self.boundary_reflect:
-            in_grid = ((self.cx > self.xmin) & (self.cx < self.xmax)
-                       & (self.cy > self.ymin) & (self.cy < self.ymax))
-            tail = self.cy[in_grid][-20:] if in_grid.sum() >= 20 else self.cy
-            chy = 2.0 * ymid - float(np.mean(tail))
-            margin = 0.25 * (self.ymax - self.ymin)
-            chy = float(np.clip(chy, self.ymin + margin, self.ymax - margin))
+        k = 0.3
+        h = 0.8
+        phi = np.degrees(np.arcsin(h))
+        b1 = 2.0 * np.exp(-k * h) * np.cos(np.radians(k * np.cos(np.radians(phi))))
+        b2 = -1.0 * np.exp(-2.0 * k * h)
+        m = (450.0 - chazi) * (16.33 / 360.0)
+        s = self._resc(1.0, 2.0, 1.0, 13.0, chsinu)
+        ang_init = 450.0 - chazi
+
+        for _ in range(max_attempts):
+            noise = np.random.normal(0.0, 1.0, ndis_max) * s + m
+            cx = np.empty(ndis_max + 1, dtype=np.float64)
+            cy = np.empty(ndis_max + 1, dtype=np.float64)
+            cx[0] = x0
+            cy[0] = y0
+            ang1 = ang_init
+            ang2 = ang_init
+            short = False
+            n_ok = 1
+            for i in range(ndis_max):
+                ang = b1 * ang1 + b2 * ang2 + noise[i]
+                x = cx[i] + self.step * np.cos(np.radians(ang))
+                y = cy[i] + self.step * np.sin(np.radians(ang))
+                if x > self.xmax or x < self.xmin or y > self.ymax or y < self.ymin:
+                    if i < ndis_max // 10:
+                        short = True
+                        break
+                    n_ok = i  # nodes 0..i-1 are in-grid; AL: ``ndis = i-1`` then exit
+                    break
+                cx[i + 1] = x
+                cy[i + 1] = y
+                ang2 = ang1
+                ang1 = ang
+                n_ok = i + 2
+            if short:
+                continue
+            return cx[:n_ok].copy(), cy[:n_ok].copy()
+        return None, None
+
+    def _sample_streamline(self):
+        """Sample (chazi, chsinu, y0) per Alluvsim ``buildCHtable.for:73-88``."""
+        chazi = float(np.random.normal(self.mCHazi, max(self.stdevCHazi, 1e-9)))
+        chsinu = float(np.random.normal(self.mCHsinu, max(self.stdevCHsinu, 1e-9)))
+        chsinu = float(np.clip(chsinu, 1.1, 1.9))
+        if self.stdevCHsource > 0.0:
+            y0 = float(np.random.normal(self.mCHsource, self.stdevCHsource))
+            y0 = float(np.clip(y0, self.ymin, self.ymax))
         else:
-            chy = ymid
-        success = 0
-        attempts = 0
-        while success == 0:
-            angle = np.random.uniform(-np.pi / 1800, np.pi / 1800)
-            success = self.generate_streamline(y0=chy, m=angle, s=s_noise)
-            attempts += 1
-            if attempts >= 20:
-                chy = ymid
-        self.chwidth = self.b * np.ones(self.ndis)
-        self.maxb = 2 * np.max(self.chwidth)
-        self.touch_b = 0
+            y0 = float(np.random.uniform(self.ymin, self.ymax))
+        x0 = self.xmin
+        return x0, y0, chazi, chsinu
+
+    def generate_streamline(self, x0=None, y0=None, chazi=None, chsinu=None) -> int:
+        """Build a fresh streamline by AR(2) walk → spline-resample to ndis0.
+
+        Returns 1 on success, 0 on failure (walk too short or spline error).
+        """
+        if x0 is None:
+            x0_, y0_, chazi_, chsinu_ = self._sample_streamline()
+            if x0 is None: x0 = x0_
+            if y0 is None: y0 = y0_
+            if chazi is None: chazi = chazi_
+            if chsinu is None: chsinu = chsinu_
+        cx0, cy0 = self._ar2_walk(x0, y0, chazi, chsinu, self.ndis0)
+        if cx0 is None or cx0.size < 20:
+            return 0
+
+        # Natural cubic spline + resample to ndis0 uniformly along arc length
+        length = np.zeros(cx0.size)
+        length[1:] = np.sqrt(np.diff(cx0) ** 2 + np.diff(cy0) ** 2)
+        length = np.cumsum(length)
+        try:
+            sx = CubicSpline(length, cx0, bc_type='natural')
+            sy = CubicSpline(length, cy0, bc_type='natural')
+        except Exception:
+            return 0
+
+        L = np.linspace(0.0, length[-1], self.ndis0)
+        self.cx = sx(L)
+        self.cy = sy(L)
+        self.ndis = self.cx.size
+        # Per-node CHelev — uniform at chelev (Alluvsim chamat[:,11] is set
+        # constant per streamline by ``avulsioninside.for:149`` /
+        # ``lookupstream.for``).
+        self.chelev_arr = np.full(self.ndis, self.chelev, dtype=np.float64)
+        # Reset per-streamline width cache so onedrf is regenerated
+        self._chwidth_arr = None
+        self._chwidth_state_n = -1
+        # Store sampled azimuth/sinuosity for later avulsion-inside
+        self._chazi = float(chazi)
+        self._chsinu = float(chsinu)
+        return 1
+
+    # ----------------------------------------------------------------- streamline pool (buildCHtable)
+
+    def _build_streamline_pool(self):
+        """Pre-build ``CHndraw`` candidate streamlines (Alluvsim ``buildCHtable.for``).
+
+        Each candidate has its own (chazi, chsinu, y0) draw, AR(2) walk, and
+        per-node onedrf width. Sampling at avulsion-outside is uniform over
+        the pool (no horimat trend; Alluvsim's ``chadrawwt`` collapses to
+        uniform when ``horifl`` is unset, which is the default for our use
+        case — see tracker §3.3).
+        """
+        pool = []
+        for _ in range(self.CHndraw):
+            x0, y0, chazi, chsinu = self._sample_streamline()
+            cx, cy = self._ar2_walk(x0, y0, chazi, chsinu, self.ndis0)
+            if cx is None or cx.size < 20:
+                continue
+            length = np.zeros(cx.size)
+            length[1:] = np.sqrt(np.diff(cx) ** 2 + np.diff(cy) ** 2)
+            length = np.cumsum(length)
+            try:
+                sx = CubicSpline(length, cx, bc_type='natural')
+                sy = CubicSpline(length, cy, bc_type='natural')
+            except Exception:
+                continue
+            L = np.linspace(0.0, length[-1], self.ndis0)
+            cx_r = sx(L)
+            cy_r = sy(L)
+            # Per-node halfwidth via onedrf (used in ``lookupstream``)
+            chdepth = max(0.0, float(np.random.normal(self.mCHdepth, self.stdevCHdepth)))
+            chwdratio = max(0.0, float(np.random.normal(self.mCHwdratio, self.stdevCHwdratio)))
+            half_arr = self._onedrf(cx_r.size, chdepth, self.stdevCHdepth2) * chwdratio * 0.5
+            half_arr = np.clip(half_arr, 0.01, None)
+            pool.append({
+                'cx': cx_r, 'cy': cy_r,
+                'chazi': chazi, 'chsinu': chsinu,
+                'chdepth': chdepth, 'chwdratio': chwdratio,
+                'chwidth_arr': half_arr,
+            })
+        self._pool = pool
+
+    def _draw_from_pool(self) -> int:
+        """Sample one streamline from the pre-built pool (uniform weights).
+
+        Mirrors ``probdraw + lookupstream`` in ``streamsim.for:727-728``.
+        Returns 1 on success.
+        """
+        if not self._pool:
+            self._build_streamline_pool()
+            if not self._pool:
+                return 0
+        idx = int(np.random.randint(0, len(self._pool)))
+        c = self._pool[idx]
+        self.cx = c['cx'].copy()
+        self.cy = c['cy'].copy()
+        self.ndis = self.cx.size
+        self.CHdepth = float(c['chdepth'])
+        self.CHwdratio = float(c['chwdratio'])
+        self.gr_dwratio = 2.0 / max(self.CHwdratio, 1e-6)
+        self.CHhalfwidth = 0.5 * self.CHdepth * self.CHwdratio
+        self._chazi = float(c['chazi'])
+        self._chsinu = float(c['chsinu'])
+        self._chwidth_arr = c['chwidth_arr'].copy()
+        self._chwidth_state_n = self.cx.size
+        self.chelev_arr = np.full(self.ndis, self.chelev, dtype=np.float64)
+        return 1
+
+    # ----------------------------------------------------------------- per-node onedrf width
+
+    def _onedrf(self, n: int, tmean: float, tstdev: float) -> np.ndarray:
+        """1D Gaussian RF with triangular covariance (port of ``onedrf.for``).
+
+        Returns N(tmean, tstdev) array of length n with correlation range
+        ``self.nCHcor`` cells.
+        """
+        L = max(int(self.nCHcor), 1)
+        white = np.random.normal(0.0, 1.0, n + 2 * L)
+        # Triangular kernel: w[0]=1/L, w[i]=(L-i)/L^2 for |i|<=L
+        kernel = np.array([(L - abs(i)) / float(L * L) for i in range(-L, L + 1)],
+                          dtype=np.float64)
+        smoothed = np.convolve(white, kernel, mode='same')[L:L + n]
+        var = float(smoothed.var())
+        std = np.sqrt(max(var, 0.001))
+        return (smoothed - smoothed.mean()) * (max(tstdev, 0.0) / std) + tmean
+
+    def _refresh_chwidth(self):
+        """Regenerate the per-node halfwidth via onedrf if needed.
+
+        Mirrors Alluvsim ``buildCHtable.for:140-159`` /
+        ``avulsioninside.for:212-225``: onedrf produces per-node depth
+        (mean=CHdepth, stdev=stdevCHdepth2), then halfwidth = depth*CHwdratio*0.5.
+        """
+        if (self._chwidth_arr is not None
+                and self._chwidth_state_n == self.cx.size
+                and self._chwidth_arr.size == self.cx.size):
+            return
+        depth_arr = self._onedrf(self.cx.size, self.CHdepth, self.stdevCHdepth2)
+        half_arr = depth_arr * self.CHwdratio * 0.5
+        self._chwidth_arr = np.clip(half_arr, 0.01, None)
+        self._chwidth_state_n = self.cx.size
+        self.maxCHhalfwidth = float(self._chwidth_arr.max())
+
+    # ----------------------------------------------------------------- curvature pipeline
+
+    def cal_curv(self):
+        """Build splines and compute per-node (azi, curv, dcsids, thalweg).
+
+        Direct port of Alluvsim ``curvature2.for``:
+
+        1. Per-segment azimuth via ``azimuth(x1,x2,y1,y2)`` (compass deg).
+        2. ``movwinsmooth(spline_i, nwin=10)`` — smooth azimuth.
+        3. Curvature ``c = dazi/ds`` (with 360° wrap fix).
+        4. ``movwinsmooth(spline_c, nwin=10)`` — smooth curvature.
+        5. ``d = dc/ds`` (finite difference) → ``movwinsmooth(spline_d, nwin=10)``.
+        6. Single global ``maxcurve = max|c|`` → thalweg = 0.5 ± 0.25|c|/maxcurve.
+        7. Resample (cx, cy, w, t, c, d, i, z, ds) to ``ndis0`` uniform spacing.
+        """
+        if self.cx is None or self.cx.size < 3:
+            return
+        n0 = self.cx.size
+        dl = np.zeros(n0)
+        dl[1:] = np.sqrt(np.diff(self.cx) ** 2 + np.diff(self.cy) ** 2)
+        s_seg = np.cumsum(dl)
+        # Per-segment compass azimuth
+        azi = np.zeros(n0)
+        for i in range(1, n0):
+            di = self.cx[i] - self.cx[i - 1]
+            dj = self.cy[i] - self.cy[i - 1]
+            if di == 0.0:
+                azi[i] = 0.0 if dj > 0 else 180.0
+            elif di > 0.0 and dj >= 0.0:
+                azi[i] = 90.0 - np.degrees(np.arctan(dj / di))
+            elif di < 0.0:
+                azi[i] = 270.0 - np.degrees(np.arctan(dj / di))
+            else:  # di > 0, dj < 0
+                azi[i] = 90.0 - np.degrees(np.arctan(dj / di))
+        azi[0] = azi[1]
+        azi = _movwinsmooth(azi, 10)
+
+        # Curvature with 360° wrap correction
+        c = np.zeros(n0)
+        for i in range(1, n0):
+            ds = s_seg[i] - s_seg[i - 1]
+            a1 = azi[i - 1]
+            a2 = azi[i]
+            d1 = a2 - a1
+            d2 = a2 - (a1 + 360.0)
+            dazi = d1 if abs(d1) < abs(d2) else d2
+            c[i] = dazi / max(ds, 1e-9)
+        c[0] = c[1]
+        c = _movwinsmooth(c, 10)
+
+        # dCsi/ds
+        d = np.zeros(n0)
+        for i in range(1, n0):
+            ds = s_seg[i] - s_seg[i - 1]
+            d[i] = (c[i] - c[i - 1]) / max(ds, 1e-9)
+        d[0] = d[1]
+        d = _movwinsmooth(d, 10)
+
+        # Thalweg with single global max (matches AL)
+        maxcurve = float(np.abs(c).max()) + 1e-9
+        thalweg = np.where(
+            c < 0.0,
+            0.5 - 0.25 * np.abs(c) / maxcurve,
+            0.5 + 0.25 * np.abs(c) / maxcurve,
+        )
+
+        # Per-node halfwidth
+        self._refresh_chwidth()
+        w = self._chwidth_arr
+        if w is None or w.size != n0:
+            w = self.CHhalfwidth * np.ones(n0)
+        z = self.chelev_arr if (self.chelev_arr is not None
+                                 and self.chelev_arr.size == n0) else np.full(n0, self.chelev)
+
+        # Spline-resample to ndis0 uniform
+        try:
+            sx = CubicSpline(s_seg, self.cx, bc_type='natural')
+            sy = CubicSpline(s_seg, self.cy, bc_type='natural')
+            sw = CubicSpline(s_seg, w, bc_type='natural')
+            st = CubicSpline(s_seg, thalweg, bc_type='natural')
+            sc = CubicSpline(s_seg, c, bc_type='natural')
+            sd = CubicSpline(s_seg, d, bc_type='natural')
+            si = CubicSpline(s_seg, azi, bc_type='natural')
+            sz = CubicSpline(s_seg, z, bc_type='natural')
+        except Exception:
+            return
+
+        L = np.linspace(0.0, s_seg[-1], self.ndis0)
+        self.length = L
+        self.cx = sx(L)
+        self.cy = sy(L)
+        self.chwidth = np.clip(sw(L), 0.01, None)
+        self.thalweg = np.clip(st(L), 1e-3, 1.0 - 1e-3)
+        self.curv = sc(L)
+        self.dcsids = sd(L)
+        self.azi = si(L)
+        self.chelev_arr = sz(L)
+        # Per-node ds for the migration integral
+        ds = np.zeros(self.ndis0)
+        ds[1:] = np.diff(L)
+        ds[0] = ds[1] if ds.size > 1 else self.step
+        self.dlength = ds
+        self.ndis = self.cx.size
+        # Per-node halfwidth becomes the resampled view; cache for stamps
+        self._chwidth_arr = self.chwidth
+        self._chwidth_state_n = self.ndis
+        self.maxCHhalfwidth = float(self.chwidth.max())
+        # Tangent vectors (for downstream cross-product side tests)
+        self.vx = np.cos(np.radians(450.0 - self.azi))
+        self.vy = np.sin(np.radians(450.0 - self.azi))
+
+    # ----------------------------------------------------------------- migration
+
+    def _migrate_one_step(self, distMigrate: float) -> int:
+        """One bank-retreat step (port of ``calcusb.for`` + ``migrate.for``).
+
+        ``calcusb.for`` form (Sun 1996 eq. 15):
+          ``part1 = -us0*Csi``
+          ``part2 = mCHhalfwidth*Cf/us0``
+          ``part3 = us0^4 / (g*h0^2)``
+          ``part4 = (scour_factor+2)*us0^2/h0``
+          ``inte = sum_{j=idis}^{idis-30} exp(-2 Cf ds_cum / h0) * Csi_j``
+          ``usbmat[idis] = part1 + part2*(part3+part4)*inte``
+
+        Then ``migrate.for``: ``ang = chamat[idis,9] + 90``,
+        ``x' = x + dist*sind(ang); y' = y + dist*cosd(ang)``. Equivalent to
+        offsetting each node by ``dist`` perpendicular to its tangent.
+        """
+        if self.cx is None or self.cx.size < 20:
+            return 0
+        self.cal_curv()
+        n = self.ndis
+        ds = self.dlength
+        c = self.curv
+        # Pre-sum ds backward for the 30-node integral with exp decay
+        usb = np.zeros(n)
+        mCHhalfwidth_eff = self.CHhalfwidth
+        part2 = mCHhalfwidth_eff * self.Cf / self.us0
+        part3 = self.us0 ** 4 / (self.g * self.h0 ** 2)
+        part4 = (self.A + 2.0) * self.us0 ** 2 / self.h0
+        for idis in range(1, n):
+            start = max(0, idis - 30)
+            ds_cum = 0.0
+            inte = 0.0
+            for j in range(idis, start - 1, -1):
+                ds_cum += ds[j]
+                inte += np.exp(-2.0 * self.Cf * ds_cum / self.h0) * c[j]
+            usb[idis] = -self.us0 * c[idis] + part2 * (part3 + part4) * inte
+        # Rescale to peak distMigrate
+        max_abs = float(np.max(np.abs(usb)))
+        if max_abs <= 1e-9:
+            return 0
+        usb *= distMigrate / max_abs
+        # Perpendicular offset. AL ``migrate.for:93-97`` literally writes
+        # ``ang = chamat[idis,9] + 90`` (compass-right of motion direction)
+        # but with c>0 = compass-CW = right-turn, the cutbank is on the
+        # LEFT of motion (outer bend), so AL's literal +90 sends the channel
+        # toward the inner bank and the streamline straightens instead of
+        # amplifying bends. We use ``azi - 90`` (compass-LEFT of motion) so
+        # positive usb at a c>0 apex moves the channel toward the cutbank
+        # and bends grow per Sun 1996. Verified against Pyrcz 2003 Fig 4.
+        ang_perp = self.azi - 90.0
+        nx_perp = np.sin(np.radians(ang_perp))
+        ny_perp = np.cos(np.radians(ang_perp))
+        # Pin proximal endpoint (idx 0); migrate idx 1..n-1
+        self.cx[1:] = self.cx[1:] + usb[1:] * nx_perp[1:]
+        self.cy[1:] = self.cy[1:] + usb[1:] * ny_perp[1:]
+
+        # Geometric neckcutoff (Alluvsim ``neckcutoff.for``)
+        thresh = self.maxCHhalfwidth * 3.0
+        new_n = make_cutoff(self.cx, self.cy, self.dlength, thresh)
+        if new_n < 20:
+            return 0
+        self.cx = self.cx[:new_n].copy()
+        self.cy = self.cy[:new_n].copy()
+        # Always recompute curvature after migration (item 1.11)
+        self.ndis = self.cx.size
+        # Width array stays per-node — re-trim to match new node count
+        if self._chwidth_arr is not None and self._chwidth_arr.size > self.ndis:
+            self._chwidth_arr = self._chwidth_arr[:self.ndis].copy()
+            self._chwidth_state_n = self.ndis
+        if self.chelev_arr is not None and self.chelev_arr.size > self.ndis:
+            self.chelev_arr = self.chelev_arr[:self.ndis].copy()
+        self.cal_curv()
+        return 1
+
+    # ----------------------------------------------------------------- avulsion
+
+    def _avulse_inside(self):
+        """Port of ``avulsioninside.for`` — curvature-weighted node, fresh AR(2) tail."""
+        if self.cx is None or self.cx.size < 20:
+            return False
+        self.cal_curv()
+        n = self.ndis
+        # Pick avulsion node weighted by |curv| over [1, n-2] (AL excludes only 1 endpoint each side)
+        weights = np.abs(self.curv).copy()
+        if n > 2:
+            weights[0] = 0.0
+            weights[-1] = 0.0
+        if weights.sum() <= 1e-12:
+            ianode = int(np.random.randint(1, n - 1))
+        else:
+            p = weights / weights.sum()
+            ianode = int(np.random.choice(n, p=p))
+        local_azi = float(self.azi[ianode])
+        chsinu = float(getattr(self, '_chsinu', self.mCHsinu))
+
+        # AR(2) tail from (cx[ianode], cy[ianode]) toward local_azi
+        cx_tail, cy_tail = self._ar2_walk(
+            float(self.cx[ianode]), float(self.cy[ianode]),
+            chazi=local_azi, chsinu=chsinu,
+            ndis_max=self.ndis0,
+        )
+        if cx_tail is None or cx_tail.size < 5:
+            return False
+        # Splice (drop the duplicate first node of the tail)
+        cx_new = np.concatenate([self.cx[:ianode + 1], cx_tail[1:]])
+        cy_new = np.concatenate([self.cy[:ianode + 1], cy_tail[1:]])
+        if cx_new.size < 20:
+            return False
+        # ``cororigin``-style proximal smoothing of the splice (item 3.9)
+        nsiz = min(int(self.nCHcor), max(cx_new.size // 8, 3))
+        i0 = max(ianode - nsiz, 1)
+        i1 = min(ianode + nsiz + 1, cx_new.size)
+        if i1 - i0 >= 3:
+            half_w = max(nsiz // 2, 1)
+            sm_x = cx_new[i0:i1].copy()
+            sm_y = cy_new[i0:i1].copy()
+            for j in range(i0, i1):
+                lo = max(j - half_w, 0)
+                hi = min(j + half_w + 1, cx_new.size)
+                sm_x[j - i0] = cx_new[lo:hi].mean()
+                sm_y[j - i0] = cy_new[lo:hi].mean()
+            cx_new[i0:i1] = sm_x
+            cy_new[i0:i1] = sm_y
+
+        # Resample to ndis0 (NO 4× upsample — item 2.9)
+        length = np.zeros(cx_new.size)
+        length[1:] = np.sqrt(np.diff(cx_new) ** 2 + np.diff(cy_new) ** 2)
+        length = np.cumsum(length)
+        if length[-1] < 1e-3:
+            return False
+        try:
+            sx = CubicSpline(length, cx_new, bc_type='natural')
+            sy = CubicSpline(length, cy_new, bc_type='natural')
+        except Exception:
+            return False
+        L = np.linspace(0.0, length[-1], self.ndis0)
+        self.cx = sx(L)
+        self.cy = sy(L)
+        self.ndis = self.cx.size
+        self.chelev_arr = np.full(self.ndis, self.chelev, dtype=np.float64)
+
+        # Width splice with delta_width offset (item 2.27)
+        self._refresh_chwidth_after_splice(ianode)
+        return True
+
+    def _refresh_chwidth_after_splice(self, ianode_old: int):
+        """Regenerate per-node width via onedrf, splice continuously at ianode.
+
+        Port of ``avulsioninside.for:212-225`` — keeps width continuous at
+        the avulsion node (``delta_width = chamat[ianode,5,old] - new[ianode]``).
+        """
+        # We have replaced the streamline; regenerate full width array.
+        depth_arr = self._onedrf(self.ndis, self.CHdepth, self.stdevCHdepth2)
+        half_arr = np.clip(depth_arr * self.CHwdratio * 0.5, 0.01, None)
+        # Find the splice node in the resampled coord (~ ianode/n_old fraction)
+        if self._chwidth_arr is not None and self._chwidth_arr.size > 0:
+            # Approximate: use the closest fractional index
+            ia = min(max(ianode_old, 0), self._chwidth_arr.size - 1)
+            old_w = float(self._chwidth_arr[ia])
+            ia_new = min(max(int(round(ia / max(self._chwidth_arr.size - 1, 1)
+                                          * (self.ndis - 1))), 0), self.ndis - 1)
+            delta_w = old_w - float(half_arr[ia_new])
+            half_arr[ia_new + 1:] = np.clip(half_arr[ia_new + 1:] + delta_w, 0.01, None)
+            half_arr[:ia_new + 1] = self._chwidth_arr[:ia_new + 1] if ia_new + 1 <= self._chwidth_arr.size \
+                                    else half_arr[:ia_new + 1]
+        self._chwidth_arr = half_arr
+        self._chwidth_state_n = self.ndis
+        self.maxCHhalfwidth = float(half_arr.max())
+
+    # ----------------------------------------------------------------- coordinate rotation (back-compat)
 
     def _rotated_stream(self):
-        """Return (cx, cy, vx, vy) rotated by ``self.azimuth_rad`` CW
-        around the grid centre.  Identity when ``azimuth == 0``.
-
-        Matches the compass convention in ``extra/azimuth.jpg``: the
-        engine's native +x flow direction maps to (cos az, -sin az) in
-        the rotated frame, so az=0°→+x, 90°→-y, 180°→-x, 270°→+y (plus
-        the diagonals at 45°/135°/225°/315°).  Curvature is a signed
-        scalar, rotation-invariant in 2D, so it's reused as-is.
-        """
         if self.azimuth_rad == 0.0:
             return self.cx, self.cy, self.vx, self.vy
         c, s = self._cos_az, self._sin_az
@@ -299,429 +777,312 @@ class fluvial:
         vy_r = -self.vx * s + self.vy * c
         return cx_r, cy_r, vx_r, vy_r
 
-    def _stamp_current_streamline(self, NNN):
-        """Paint the current streamline into ``self.facies`` at
-        ``self.chelev``.  Assumes ``cal_curv`` has been called so
-        ``vx/vy/curv/thalweg`` are current.
+    # ----------------------------------------------------------------- per-event geometry redraw
 
-        The streamline is passed through as-is, including nodes that
-        fall outside the grid.  ``genchannel``'s ``find_near_grid``
-        clips stamping to valid grid cells, and keeping the out-of-grid
-        nodes makes them available as nearest-neighbour anchors for
-        cells near the boundary — so streamlines extending past the
-        grid still paint their in-grid portion cleanly up to the edge
-        instead of being dropped and leaving a visible gap.
+    def _redraw_event_geometry(self):
+        """Per-event Gaussian draws for CHdepth, CHwdratio.
+
+        Mirrors ``streamsim.for:831-840``. Width-array regenerated via onedrf.
         """
-        if self.cx.size < 3:
+        self.CHdepth = _gauss_clip(self.mCHdepth, self.stdevCHdepth, lo=1e-3)
+        self.CHwdratio = _gauss_clip(self.mCHwdratio, self.stdevCHwdratio, lo=1e-3)
+        self.CHhalfwidth = 0.5 * self.CHdepth * self.CHwdratio
+        self.gr_dwratio = 2.0 / max(self.CHwdratio, 1e-6)
+        self._chwidth_arr = None
+        self._chwidth_state_n = -1
+
+    # ----------------------------------------------------------------- stamps
+
+    def _stamp_channel(self, facies_code: int, erode_above: bool):
+        if self.cx is None or self.cx.size < 3:
             return
+        if (self.vx is None or self.vx.size != self.cx.size
+                or self.curv is None or self.curv.size != self.cx.size
+                or self.thalweg is None or self.thalweg.size != self.cx.size):
+            self.cal_curv()
+        self._refresh_chwidth()
         cx_r, cy_r, vx_r, vy_r = self._rotated_stream()
+        chwidth_arr = self._chwidth_arr
+        chelev_arr = self.chelev_arr if (self.chelev_arr is not None
+                                          and self.chelev_arr.size == self.cx.size) \
+                     else np.full(self.cx.size, self.chelev, dtype=np.float64)
         genchannel(
-            self.b, self.xsiz, self.ysiz, self.chelev, self.zsiz,
+            float(self.maxCHhalfwidth), self.xsiz, self.ysiz, chelev_arr, self.zsiz,
             self.nx, self.ny, self.nz, cx_r, cy_r, self.x, self.y,
             vx_r, vy_r, self.curv, self.LV_asym, self.lV_height,
             self.ps, self.pavul, self.out, self.totalid, self.facies,
-            self.poro, self.poro0, self.thalweg, self.chwidth, self.dwratio,
-            [1000000000], NNN,
+            self.poro, self.poro0, self.thalweg, chwidth_arr, self.gr_dwratio,
+            [1_000_000_000], 800,
+            xmn=self.xmn, ymn=self.ymn,
+            merge_overlap=False,
+            facies_code=int(facies_code),
+            ntg_counter=self.ntg_counter,
+            compute_poro=False,
+            erode_above=bool(erode_above),
         )
 
-    def _migrate_one_step(self):
-        """One Sun-1996 bank-retreat migration step.  Updates ``cx/cy``
-        in place and populates ``self.idxx`` with the keep-mask from
-        ``make_cutoff``.  Sets ``self.touch_b=1`` if the streamline is
-        approaching a Y-boundary.  Returns 0 if the streamline is too
-        short to continue, 1 otherwise."""
-        if self.cx.size < 20:
-            return 0
-        self.cal_curv()
-        self.usbmat = np.zeros(self.ndis)
-        for idis in np.arange(1, self.ndis):
-            dx = self.splx.integral(self.length[idis - 1], self.length[idis])
-            dy = self.sply.integral(self.length[idis - 1], self.length[idis])
-            dlength = np.sqrt(dx**2 + dy**2)
-            self.usbmat[idis] = (
-                self.b / (self.us0 / dlength + 2 * (self.us0 / self.h0) * self.Cf)
-                * (-self.us0**2 * self.dcsids[idis]
-                   + self.Cf * self.curv[idis] * (self.us0**4 / self.g / self.h0**2
-                                                  + self.A * self.us0**2 / self.h0)
-                   + self.us0 / dlength * self.usbmat[idis - 1] / self.b)
-            )
-        self.usbmat = np.abs(self.usbmat)
+    def _stamp_splays(self, n_splay: int, n_lobe_per_splay: int):
+        """Place ``n_splay`` crevasse-splay clusters along the streamline.
 
-        tmigrate = self.migration_distance * (self.xsiz + self.ysiz)
-        vt = np.sqrt(self.vx**2 + self.vy**2)
-        damp = np.ones(self.cx.size)
-        dist = np.arange(self.cx.size)
-        damp = 2 - 2 / (1 + np.exp(-np.abs(dist - dist.mean()) / 100))
-        self.usbmat_vx = (np.sign(self.curv) * self.vy / vt * self.usbmat * damp
-                          + 100 * self.us0 * self.vx / vt)
-        self.usbmat_vy = (-np.sign(self.curv) * self.vx / vt * self.usbmat * damp
-                          + 100 * self.us0 * self.vy / vt)
-        self.usbmat_t = np.sqrt(self.usbmat_vx**2 + self.usbmat_vy**2)
-        self.maxmigrate = np.max(self.usbmat_t)
-        self.E = tmigrate / self.maxmigrate
-
-        self.cy[:21] = self.cy[16]
-        self.cx[20:] = self.cx[20:] + self.usbmat_vx[20:] * self.E
-        self.cy[20:] = self.cy[20:] + self.usbmat_vy[20:] * self.E
-
-        cut_dist = int(1 * self.ndis / 2)
-        thresh = self.b * 2.5
-        idxx = np.ones(self.ndis)
-        make_cutoff(self.step, self.ndis, self.dlength, thresh, cut_dist,
-                    self.cx, self.cy, idxx, self.totalid)
-
-        if (np.sum(self.cy > self.ymax - self.ny / 5 * self.ysiz * (1 - self.chelev / self.nz / self.zsiz))
-                + np.sum(self.cy < self.ymin + self.ny / 5 * self.ysiz * (1 - self.chelev / self.nz / self.zsiz))) > 0:
-            if self.totalid > 10:
-                self.touch_b = 1
-
-        idxx[self.cx < self.x0] = 0
-        idxx[self.cx > self.x1] = 0
-        self.idxx = idxx
-        return 1
-
-    def _trim_streamline(self):
-        """Apply the current idxx cutoff mask and restore pinned endpoints.
-        Returns 0 if too few nodes remain, 1 otherwise."""
-        self.cx = self.cx[self.idxx.astype(bool)]
-        self.cy = self.cy[self.idxx.astype(bool)]
-        if self.cx.size < 20:
-            return 0
-        self.cx[0] = self.x0
-        self.cy[0] = self.y0
-        self.cx[-1] = self.x1
-        self.cy[-1] = self.y1
-        return 1
-
-    def _avulse_inmodel(self, s_noise):
-        """Port of Alluvsim's ``avulsioninside.for``.
-
-        Pick an avulsion node weighted by ``|curvature|``, copy nodes
-        up to that index, and grow a fresh tail from there using the
-        same AR(2) disturbed-periodic (Ferguson-1976) generator that
-        ``generate_streamline`` uses.  The tail direction is seeded
-        from the local tangent at the avulsion node; noise amplitude
-        ``s_noise`` matches the parent streamline's sinuosity.  The
-        tail is truncated at grid escape.
-
-        Used with ``prob_avul_inside > 0`` to produce braided-style
-        interwoven abandoned fragments: each avulsion stamps the
-        current path before splicing, so earlier branches persist in
-        ``self.facies`` while the new tail migrates.
+        Each splay is a curvature-weighted CSnode; for each lobe the splay
+        is a ``gensplay``-style random walker (``onedrf`` perturbed
+        azimuth, std=40°) of length ``CSLOLL ± 10%``, painting the lobe
+        envelope on the cutbank side.
         """
-        if self.cx.size < 20:
+        if n_splay <= 0 or n_lobe_per_splay <= 0:
             return
-        curv_abs = np.abs(self.curv)
-        w = curv_abs.copy()
-        if w.size > 10:
-            w[:5] = 0
-            w[-5:] = 0
-        if w.sum() <= 1e-12:
-            ianode = int(np.random.randint(5, max(self.cx.size - 5, 6)))
-        else:
-            p = w / w.sum()
-            ianode = int(np.random.choice(len(p), p=p))
-
-        if 0 <= ianode < self.vx.size:
-            vxn, vyn = self.vx[ianode], self.vy[ianode]
-        else:
-            vxn = self.cx[-1] - self.cx[-2]
-            vyn = self.cy[-1] - self.cy[-2]
-        local_azi = np.arctan2(vyn, vxn)
-
-        k = 0.1 * self.step0
-        h = 0.8
-        phi = np.arcsin(h)
-        b1 = 2.0 * np.exp(-k * h) * np.cos(k * np.cos(phi))
-        b2 = -1.0 * np.exp(-2.0 * k * h)
-
-        n_extend = self.ndis0
-        noise = s_noise * np.random.normal(0, 1, n_extend)
-        ar = np.array([1, b1, b2])
-        theta = scipy.signal.lfilter([1], ar, noise) + local_azi
-
-        step = self.step0
-        dx_new = step * np.cos(theta)
-        dy_new = step * np.sin(theta)
-        new_x = self.cx[ianode] + np.cumsum(dx_new)
-        new_y = self.cy[ianode] + np.cumsum(dy_new)
-
-        out_of_grid = ((new_x > self.xmax) | (new_x < self.xmin)
-                       | (new_y > self.ymax) | (new_y < self.ymin))
-        if out_of_grid.any():
-            escape_idx = int(np.argmax(out_of_grid)) + 4
-        else:
-            escape_idx = new_x.size
-        escape_idx = int(min(max(escape_idx, 0), new_x.size))
-        if escape_idx < 5:
+        if self.cx is None or self.cx.size < 5:
             return
-        new_x = new_x[:escape_idx]
-        new_y = new_y[:escape_idx]
-
-        cx_new = np.concatenate([self.cx[:ianode + 1], new_x])
-        cy_new = np.concatenate([self.cy[:ianode + 1], new_y])
-        if cx_new.size < 20:
-            return
-
-        length = np.zeros(cx_new.size)
-        length[1:] = np.sqrt((cx_new[1:] - cx_new[:-1]) ** 2
-                             + (cy_new[1:] - cy_new[:-1]) ** 2)
-        length = np.cumsum(length)
-        if length[-1] < 1e-3:
-            return
-        try:
-            splx = UnivariateSpline(length, cx_new, k=5, s=0)
-            sply = UnivariateSpline(length, cy_new, k=5, s=0)
-        except Exception:
-            return
-
-        n_fine = max(cx_new.size * 4, self.ndis0)
-        fine = np.linspace(0.0, length[-1], n_fine)
-        self.cx = splx(fine)
-        self.cy = sply(fine)
-        self.ndis = self.cx.size
-        self.x0 = float(self.cx[0])
-        self.y0 = float(self.cy[0])
-        self.x1 = float(self.cx[-1])
-        self.y1 = float(self.cy[-1])
-        self.chwidth = self.b * np.ones(self.ndis)
-        self.maxb = 2 * np.max(self.chwidth)
-        self.touch_b = 0
-
-    def simulation(self, nchannel=10):
-        self.itime = 0
-        self.facies = np.zeros((self.nx, self.ny, self.nz))
-        totalid = 0
-        self.totalid = totalid
-        success = 0
-        self.out = 0
-        self.cz = int(self.dwratio * self.b / self.zsiz)
-        self.chelev = (self.cz + 1) * self.zsiz
-
-        # Quadratic mapping gives smooth user control:
-        # meander_scale=0 → straight, 1 → moderate, 2 → legacy default (s=0.8)
-        s_noise = 0.2 * self.meander_scale ** 2
-
-        while success == 0:
-            chy = np.random.uniform(
-                self.ymin + (self.ymax - self.ymin) / 2,
-                self.ymin + (self.ymax - self.ymin) / 2,
-            )
-            angle = np.random.uniform(-np.pi / 1800, np.pi / 1800)
-            success = self.generate_streamline(y0=chy, m=angle, s=s_noise)
-        idxx = np.ones(self.cx.size)
-        self.chelev = (self.cz + 1) * self.zsiz
-        self.touch_b = 0
-        ntg = 0
-        self.myinit = 10
-        self.mybot = 0
-
-        NNN = nchannel * 10
-        if self.aggradation_mode == 'discrete':
-            return self._simulate_discrete(nchannel, NNN, s_noise)
-
-        for ddd in range(NNN):
-            self.myinit -= 1
-            self.ps = 1
-            self.out = 0
-
-            self.chelev = self.chelev + self.aggrad[int((self.totalid - 1) / (NNN / len(self.aggrad)))]
-
-            totalid += 1
-            self.totalid = totalid
-
-            if self.touch_b == 1:
-                self.out = 1
-                self.cal_curv()
-                cx_r, cy_r, vx_r, vy_r = self._rotated_stream()
-                genchannel(
-                    self.b, self.xsiz, self.ysiz, self.chelev, self.zsiz,
-                    self.nx, self.ny, self.nz, cx_r, cy_r, self.x, self.y,
-                    vx_r, vy_r, self.curv, self.LV_asym, self.lV_height,
-                    self.ps, self.pavul, self.out, self.totalid, self.facies,
-                    self.poro, self.poro0, self.thalweg, self.chwidth,
-                    self.dwratio, [10000000000], NNN,
-                )
-                self.out = 0
-
-                ymid = 0.5 * (self.ymin + self.ymax)
-                if self.boundary_reflect:
-                    # Reflect the last in-grid segment across ymid instead of
-                    # restarting at mid-Y. Preserves Z-continuity of the
-                    # channel belt across boundary-touch events.
-                    in_grid = ((self.cx > self.xmin) & (self.cx < self.xmax)
-                               & (self.cy > self.ymin) & (self.cy < self.ymax))
-                    tail = self.cy[in_grid][-20:] if in_grid.sum() >= 20 else self.cy
-                    chy = 2.0 * ymid - float(np.mean(tail))
-                    margin = 0.25 * (self.ymax - self.ymin)
-                    chy = float(np.clip(chy, self.ymin + margin, self.ymax - margin))
-                else:
-                    chy = ymid
-                success = 0
-                attempts = 0
-                while success == 0:
-                    angle = np.random.uniform(-np.pi / 1800, np.pi / 1800)
-                    success = self.generate_streamline(y0=chy, m=angle, s=s_noise)
-                    attempts += 1
-                    if attempts >= 20:
-                        chy = ymid
-                self.chwidth = self.b * np.ones(self.ndis)
-                self.maxb = 2 * np.max(self.chwidth)
-                self.touch_b = 0
-                continue
-
-            if self.cx.size < 20:
-                return 0
-
+        if (self.vx is None or self.vx.size != self.cx.size
+                or self.curv is None or self.curv.size != self.cx.size
+                or self.azi is None):
             self.cal_curv()
+        self._refresh_chwidth()
+        cx_r, cy_r, vx_r, vy_r = self._rotated_stream()
+        weights = np.abs(self.curv)
+        if weights.sum() <= 1e-12:
+            weights = np.ones_like(weights)
+        p = weights / weights.sum()
 
-            # Calculate near bank velocity
-            self.usbmat = np.zeros(self.ndis)
-            for idis in np.arange(1, self.ndis):
-                dx = self.splx.integral(self.length[idis - 1], self.length[idis])
-                dy = self.sply.integral(self.length[idis - 1], self.length[idis])
-                dlength = np.sqrt(dx**2 + dy**2)
-                self.usbmat[idis] = (
-                    self.b / (self.us0 / dlength + 2 * (self.us0 / self.h0) * self.Cf)
-                    * (-self.us0**2 * self.dcsids[idis]
-                       + self.Cf * self.curv[idis] * (self.us0**4 / self.g / self.h0**2
-                                                      + self.A * self.us0**2 / self.h0)
-                       + self.us0 / dlength * self.usbmat[idis - 1] / self.b)
+        for _ in range(int(n_splay)):
+            cs_node = int(np.random.choice(len(p), p=p))
+            curv_at = float(self.curv[cs_node])
+            cs_azi = float(self.azi[cs_node])
+            # Cutbank rule (streamsim.for:907-911): curv > 0 → CSazi -= 90
+            if curv_at > 0.0:
+                cs_azi = cs_azi - 90.0
+            else:
+                cs_azi = cs_azi + 90.0
+            for _l in range(int(n_lobe_per_splay)):
+                cs_LL = _gauss_clip(self.mCSLOLL, self.stdevCSLOLL, lo=1e-3)
+                cs_WW = _gauss_clip(self.mCSLOWW, self.stdevCSLOWW, lo=1e-3)
+                cs_l = _gauss_clip(self.mCSLOl, self.stdevCSLOl, lo=1e-3, hi=cs_LL)
+                cs_w = _gauss_clip(self.mCSLOw, self.stdevCSLOw, lo=1e-3)
+                cs_hw = _gauss_clip(self.mCSLO_hwratio, self.stdevCSLO_hwratio, lo=1e-3)
+                cs_dw = _gauss_clip(self.mCSLO_dwratio, self.stdevCSLO_dwratio, lo=1e-3)
+                # Generate the splay random-walk centerline (gensplay.for)
+                cx_lobe, cy_lobe = self._build_splay_walker(
+                    float(cx_r[cs_node]), float(cy_r[cs_node]),
+                    cs_azi, cs_LL,
                 )
-            self.usbmat = np.abs(self.usbmat)
-
-            tmigrate = self.migration_distance * (self.xsiz + self.ysiz)
-            vt = np.sqrt(self.vx**2 + self.vy**2)
-
-            damp = np.ones(self.cx.size)
-            dist = np.arange(self.cx.size)
-            damp = 2 - 2 / (1 + np.exp(-np.abs(dist - dist.mean()) / 100))
-
-            self.usbmat_vx = (np.sign(self.curv) * self.vy / vt * self.usbmat * damp
-                              + 100 * self.us0 * self.vx / vt)
-            self.usbmat_vy = (-np.sign(self.curv) * self.vx / vt * self.usbmat * damp
-                              + 100 * self.us0 * self.vy / vt)
-            self.usbmat_t = np.sqrt(self.usbmat_vx**2 + self.usbmat_vy**2)
-            self.maxmigrate = np.max(self.usbmat_t)
-            self.E = tmigrate / self.maxmigrate
-
-            self.cy[:21] = self.cy[16]
-            self.cx[20:] = self.cx[20:] + self.usbmat_vx[20:] * self.E
-            self.cy[20:] = self.cy[20:] + self.usbmat_vy[20:] * self.E
-
-            cut_dist = int(1 * self.ndis / 2)
-            thresh = self.b * 2.5
-            idxx = np.ones(self.ndis)
-            make_cutoff(self.step, self.ndis, self.dlength, thresh, cut_dist,
-                        self.cx, self.cy, idxx, self.totalid)
-
-            if (np.sum(self.cy > self.ymax - self.ny / 5 * self.ysiz * (1 - self.chelev / self.nz / self.zsiz))
-                    + np.sum(self.cy < self.ymin + self.ny / 5 * self.ysiz * (1 - self.chelev / self.nz / self.zsiz))) > 0:
-                if self.totalid > 10:
-                    self.touch_b = 1
-
-            idxx[self.cx < self.x0] = 0
-            idxx[self.cx > self.x1] = 0
-
-            self.out = 0
-            if self.totalid % 10 == 9:
-                # Pass the full streamline; genchannel's find_near_grid
-                # clips to the grid, and keeping out-of-grid nodes lets
-                # cells near the boundary still pick them as nearest
-                # neighbours so no gap forms before the edge.
-                cx_r, cy_r, vx_r, vy_r = self._rotated_stream()
-                genchannel(
-                    self.b, self.xsiz, self.ysiz, self.chelev, self.zsiz,
-                    self.nx, self.ny, self.nz, cx_r, cy_r,
-                    self.x, self.y,
-                    vx_r, vy_r, self.curv, self.LV_asym, self.lV_height,
-                    self.ps, self.pavul, self.out, self.totalid, self.facies,
-                    self.poro, self.poro0, self.thalweg, self.chwidth,
-                    self.dwratio, [1000000000], NNN,
-                )
-
-            self.cx = self.cx[idxx.astype(bool)]
-            self.cy = self.cy[idxx.astype(bool)]
-            if self.cx.size < 20:
-                return 0
-            self.cx[0] = self.x0
-            self.cy[0] = self.y0
-            self.cx[-1] = self.x1
-            self.cy[-1] = self.y1
-            self.idxx = idxx
-
-        self.cal_curv()
-
-    def _simulate_discrete(self, nchannel, NNN, s_noise):
-        """Alluvsim-style nlevel aggradation.
-
-        The streamline migrates for ``iters_per_level`` iterations at a
-        fixed ``chelev``; a single snapshot is stamped at the end of the
-        level; ``chelev`` jumps by one channel depth; with probability
-        ``level_reseed_prob`` the streamline is re-drawn from a fresh
-        random Y for the next level.  Cf. Alluvsim's ``streamsim.for``
-        main loop + ``pv_shoestring`` preset (``nlevel=5`` over
-        ``ntime=120`` iterations, ``probAvulOutside+probAvulInside≈0.15``).
-
-        Per-Z slices each show one crisp meander rather than ~80 overlaid
-        migration snapshots piled into ~12 Z cells.
-        """
-        totalid = self.totalid
-        nlevel = max(1, self.nlevel)
-        iters_per_level = max(1, NNN // nlevel)
-        # jump = level_jump_ratio × channel depth.  ratio=1.0 stacks
-        # stamps with no vertical overlap (Alluvsim pv_shoestring); ratio
-        # <1 gives increasing overlap → a single continuous channel belt
-        # when combined with level_reseed_prob=0.
-        jump = self.level_jump_ratio * self.cz * self.zsiz
-
-        p_out = self.prob_avul_outside
-        p_in = self.prob_avul_inside
-        for ilevel in range(nlevel):
-            for inner in range(iters_per_level):
-                self.myinit -= 1
-                self.ps = 1
-                self.out = 0
-                totalid += 1
-                self.totalid = totalid
-
-                if self.touch_b == 1:
-                    self.out = 1
-                    self.cal_curv()
-                    self._stamp_current_streamline(NNN)
-                    self.out = 0
-                    self._reseed_streamline(s_noise)
+                if cx_lobe is None or cx_lobe.size < 3:
                     continue
+                # Paint lobe envelope along this walker
+                paint_lobe(
+                    cx_lobe, cy_lobe,
+                    cs_LL, cs_WW, cs_l, cs_w, cs_hw, cs_dw,
+                    self.chelev,
+                    self.x, self.y,
+                    self.nx, self.ny, self.nz,
+                    self.xsiz, self.ysiz, self.zsiz,
+                    self.facies, self.ntg_counter, lk_cs=CS,
+                    xmn=self.xmn, ymn=self.ymn,
+                )
+                # Also paint the thin gensplay sheet (`facies = 5` → CS) at
+                # iz_chelev-1 with linear taper (item 1.10/2.26)
+                paint_splay(
+                    cx_lobe, cy_lobe, self.chelev, self.CHdepth,
+                    self.x, self.y,
+                    self.nx, self.ny, self.nz,
+                    self.xsiz, self.ysiz, self.zsiz,
+                    self.facies, self.ntg_counter,
+                    xmn=self.xmn, ymn=self.ymn, lk_cs=CS,
+                )
 
-                # Avulsion draws happen BEFORE migration so the current
-                # streamline is stamped first — this preserves the
-                # pre-avulsion branch as an abandoned fragment in
-                # self.facies, producing the overlapping interwoven
-                # fragments that read as braided when p_in is large.
-                if p_out > 0.0 or p_in > 0.0:
-                    u = np.random.uniform()
-                    if u < p_out:
-                        self.cal_curv()
-                        self._stamp_current_streamline(NNN)
-                        self._reseed_streamline(s_noise, random_y=True)
-                        continue
-                    if u < p_out + p_in:
-                        self.cal_curv()
-                        self._stamp_current_streamline(NNN)
-                        self._avulse_inmodel(s_noise)
-                        continue
+    def _build_splay_walker(self, x0: float, y0: float, azi0: float, dist: float):
+        """One splay random-walk center (port of ``gensplay.for:78-115``).
 
-                if self._migrate_one_step() == 0:
-                    break
-                if self._trim_streamline() == 0:
-                    break
+        ``onedrf(l = max(1, nst/5), nst, angle, azi0, 40.0)`` then walk
+        ``x = x + step*cosd(angle); y = y + step*sind(angle)`` until the
+        walker leaves the grid or completes ``nst`` steps.
+        Length jitter ±10% via ``dist0 = (p-0.5)*dist*0.2 + dist``.
+        """
+        st = (self.xsiz + self.ysiz) / 2.0
+        p_jitter = float(np.random.uniform())
+        dist0 = (p_jitter - 0.5) * dist * 0.2 + dist
+        nst = max(int(dist0 / st), 5)
+        L = max(1, nst // 5)
+        # onedrf around mean azi0, stdev 40°
+        depth_arr = self._onedrf_with_correlation(nst, azi0, 40.0, L)
+        cx = np.empty(nst, dtype=np.float64)
+        cy = np.empty(nst, dtype=np.float64)
+        x = x0
+        y = y0
+        n_ok = 0
+        for ist in range(nst):
+            ang = depth_arr[ist]
+            # AL: x = x + step*cosd(ang); y = y + step*sind(ang) (math angle)
+            ang_math = 450.0 - ang  # convert compass → math
+            x2 = x + st * np.cos(np.radians(ang_math))
+            y2 = y + st * np.sin(np.radians(ang_math))
+            if x2 < self.xmin or x2 > self.xmax or y2 < self.ymin or y2 > self.ymax:
+                break
+            cx[ist] = x2
+            cy[ist] = y2
+            x = x2
+            y = y2
+            n_ok = ist + 1
+        if n_ok < 3:
+            return None, None
+        return cx[:n_ok], cy[:n_ok]
 
+    def _onedrf_with_correlation(self, n: int, tmean: float, tstdev: float, L: int) -> np.ndarray:
+        """``onedrf`` variant with explicit correlation length L (used by gensplay)."""
+        L = max(int(L), 1)
+        white = np.random.normal(0.0, 1.0, n + 2 * L)
+        kernel = np.array([(L - abs(i)) / float(L * L) for i in range(-L, L + 1)],
+                          dtype=np.float64)
+        smoothed = np.convolve(white, kernel, mode='same')[L:L + n]
+        var = float(smoothed.var())
+        std = np.sqrt(max(var, 0.001))
+        return (smoothed - smoothed.mean()) * (max(tstdev, 0.0) / std) + tmean
+
+    def _stamp_levee(self, LV_depth: float, LV_width: float, LV_height: float,
+                     LV_asym: float, LV_thin: float):
+        if self.cx is None or self.cx.size < 3:
+            return
+        if LV_width <= 0.0 or (LV_height + LV_depth) <= 0.0:
+            return
+        if (self.vx is None or self.vx.size != self.cx.size
+                or self.curv is None or self.curv.size != self.cx.size):
             self.cal_curv()
-            self._stamp_current_streamline(NNN)
+        self._refresh_chwidth()
+        cx_r, cy_r, _vx, _vy = self._rotated_stream()
+        chwidth_arr = self._chwidth_arr
+        chelev_arr = self.chelev_arr if (self.chelev_arr is not None
+                                          and self.chelev_arr.size == self.cx.size) \
+                     else np.full(self.cx.size, self.chelev, dtype=np.float64)
+        paint_levee(
+            cx_r, cy_r, self.curv, chwidth_arr, chelev_arr,
+            float(LV_depth), float(LV_width), float(LV_height), float(LV_asym), float(LV_thin),
+            self.x, self.y, self.xsiz, self.ysiz, self.zsiz,
+            self.nx, self.ny, self.nz, self.facies, self.ntg_counter,
+            float(self.maxCHhalfwidth),
+            xmn=self.xmn, ymn=self.ymn, lk_lv=LV,
+        )
 
-            self.chelev = self.chelev + jump
+    def _stamp_abandoned(self, mud_prop: float):
+        if self.cx is None or self.cx.size < 3:
+            return
+        if (self.vx is None or self.vx.size != self.cx.size
+                or self.curv is None or self.curv.size != self.cx.size):
+            self.cal_curv()
+        self._refresh_chwidth()
+        cx_r, cy_r, vx_r, vy_r = self._rotated_stream()
+        chwidth_arr = self._chwidth_arr
+        chelev_arr = self.chelev_arr if (self.chelev_arr is not None
+                                          and self.chelev_arr.size == self.cx.size) \
+                     else np.full(self.cx.size, self.chelev, dtype=np.float64)
+        paint_abandoned(
+            float(self.maxCHhalfwidth), cx_r, cy_r, vx_r, vy_r, self.thalweg,
+            chwidth_arr, chelev_arr, self.gr_dwratio, mud_prop,
+            self.x, self.y, self.xsiz, self.ysiz, self.zsiz,
+            self.nx, self.ny, self.nz, self.facies,
+            self.ntg_counter, self.ffch_counter,
+            xmn=self.xmn, ymn=self.ymn, lk_ffch=FFCH, lk_ch=CH,
+        )
 
-            if ilevel < nlevel - 1 and np.random.uniform() < self.level_reseed_prob:
-                self._reseed_streamline(s_noise, random_y=True)
+    # ----------------------------------------------------------------- main event loop
 
+    def simulation(self):
+        """Per-level event loop — port of ``streamsim.for:737-1004``."""
+        # Build the streamline pool once at sim start (Alluvsim:702 buildCHtable)
+        self._build_streamline_pool()
+
+        self.chelev = self.level_z[0]
+        # Initial streamline at level 0 (Alluvsim:727-731)
+        if not self._draw_from_pool():
+            return
         self.cal_curv()
+        self._is_first_streamline = True
+
+        level_target = self._level_targets()
+        ev_counter = 0
+        last_ffchprop = 0.0
+
+        for ilevel in range(self.nlevel):
+            self.chelev = float(self.level_z[ilevel])
+            self.chelev_arr = np.full(self.ndis, self.chelev, dtype=np.float64)
+            # Always reseed at level top (item 2.20 — matches AL:727-731)
+            if ilevel > 0:
+                if not self._draw_from_pool():
+                    return
+                self.cal_curv()
+
+            while (self.ntg_counter[0] - self.ffch_counter[0]) < level_target[ilevel]:
+                if ev_counter >= self.ntime:
+                    # ntime cap exit (AL:988-991 — no extra abandon; the
+                    # end-of-level path below handles abandonment).
+                    break
+                ev_counter += 1
+                self.totalid = ev_counter
+
+                ffchprop = _gauss_clip(self.mFFCHprop, self.stdevFFCHprop, lo=0.0, hi=1.0)
+                last_ffchprop = ffchprop
+                p = float(np.random.uniform())
+
+                if p < self.probAvulOutside:
+                    # Avulsion outside (AL:757-774)
+                    if not self._is_first_streamline:
+                        self._stamp_abandoned(ffchprop)
+                    if not self._draw_from_pool():
+                        continue
+                    self._redraw_event_geometry()
+                    self.cal_curv()
+                    self._is_first_streamline = False
+                elif p < (self.probAvulOutside + self.probAvulInside):
+                    # Avulsion inside (AL:782-796)
+                    self._stamp_abandoned(ffchprop)
+                    if not self._avulse_inside():
+                        continue
+                    self._redraw_event_geometry()
+                    self.cal_curv()
+                    self._is_first_streamline = False
+                else:
+                    # Migration (AL:804-820): LA on OLD path, then redraw,
+                    # migrate, neckcutoff, then CH on NEW path.
+                    self._stamp_channel(facies_code=LA, erode_above=False)
+                    self._redraw_event_geometry()
+                    distMigrate = _gauss_clip(self.mdistMigrate, self.stdevdistMigrate, lo=0.0)
+                    if self._migrate_one_step(distMigrate) == 0:
+                        if not self._draw_from_pool():
+                            return
+                        self.cal_curv()
+                    self._is_first_streamline = False
+
+                # Per-event CS draws + placement (AL:889-945)
+                cs_num = int(round(_gauss_clip(self.mCSnum, self.stdevCSnum, lo=0.0)))
+                cs_numlobe = int(round(_gauss_clip(self.mCSnumlobe, self.stdevCSnumlobe, lo=0.0)))
+                if cs_num > 0 and cs_numlobe > 0:
+                    self._stamp_splays(cs_num, cs_numlobe)
+
+                # Per-event LV draws (AL:842-865) and placement
+                lv_depth = _gauss_clip(self.mLVdepth, self.stdevLVdepth, lo=0.0)
+                lv_width = _gauss_clip(self.mLVwidth, self.stdevLVwidth, lo=0.0)
+                lv_height = _gauss_clip(self.mLVheight, self.stdevLVheight, lo=0.0)
+                lv_asym = _gauss_clip(self.mLVasym, self.stdevLVasym, lo=0.0)
+                lv_thin = _gauss_clip(self.mLVthin, self.stdevLVthin, lo=0.0)
+                self._stamp_levee(lv_depth, lv_width, lv_height, lv_asym, lv_thin)
+
+                # Active-channel stamp (AL:966-967)
+                self._stamp_channel(facies_code=CH, erode_above=True)
+
+            # End-of-level abandonment (AL:1002-1004)
+            self._stamp_abandoned(last_ffchprop)
+            if ev_counter >= self.ntime:
+                return
+
+    # ----------------------------------------------------------------- helpers
+
+    def _level_targets(self) -> np.ndarray:
+        """Cumulative NTG-cell target per level (port of ``streamsim.for:560-572``)."""
+        total_cells = self.nx * self.ny * self.nz
+        NTGcount = int(round(self.NTGtarget * total_cells))
+        iz_at_level = np.array([
+            int(np.clip(round(z / self.zsiz), 1, self.nz)) for z in self.level_z
+        ], dtype=np.int64)
+        iz_top = max(int(iz_at_level[-1]), 1)
+        targets = np.array([
+            int(round(NTGcount * iz_lvl / iz_top)) for iz_lvl in iz_at_level
+        ], dtype=np.int64)
+        return targets
