@@ -44,7 +44,11 @@ class GaussianLayer(Layer):
             facies_filter, mode='wrap'
         )
         facies_field = facies_field[nx:2*nx, ny:2*ny, nz:2*nz]
-        self.active = (facies_field < np.percentile(facies_field, ntg * 100)).astype(int)
+        self.active = (facies_field < np.percentile(facies_field, ntg * 100)).astype(np.int8)
+        # Alluvsim-style facies code: -1 (FF, floodplain / shale) where
+        # inactive, 3 (LA = lateral-accretion / bar — closest analogue
+        # to a sand-shale heterogeneous body) where active.
+        self.facies = np.where(self.active == 1, 3, -1).astype(np.int8)
 
         # Property field with spatial correlation + nugget
         poro_field = gaussian_filter(

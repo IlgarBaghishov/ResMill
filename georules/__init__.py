@@ -4,7 +4,9 @@ __version__ = "0.1.0"
 
 from .layers import (Layer, LobeLayer, GaussianLayer,
                      MeanderingChannelLayer, BraidedChannelLayer,
-                     DeltaLayer)
+                     DeltaLayer, DELTA_FAN)
 from .reservoir import Reservoir
 from .plotting import (plot_cube_slices, plot_slices, plot_layer, plot_reservoir,
+                       alluvsim_cmap, alluvsim_legend_handles,
+                       ALLUVSIM_FACIES_NAMES, ALLUVSIM_FACIES_COLORS,
                        GEORULES_CMAP)

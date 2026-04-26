@@ -2,20 +2,23 @@
 
 Scans every (idis, jdis) pair where ``jdis - idis >= dis_thresh`` to find
 two non-adjacent nodes whose Euclidean separation is below ``ctol``. When
-found, deletes nodes (idis, jdis) (the oxbow loop) by shifting the tail
-left and reducing ``ndis``. Restarts the scan from the top after every cut
-(matches AL's ``goto 435``).
+found, deletes nodes (idis, jdis] (the oxbow loop) by shifting the tail
+left and reducing ``ndis``. Restarts the scan from the top after every
+cut (matches AL's ``goto 435``).
 
 Returns the new (compacted) ``ndis`` so the caller can slice the cx/cy
-arrays.
+arrays. If the optional ``idx_map`` integer array is provided it is
+compacted alongside cx/cy, so its first ``new_n`` entries identify which
+original indices survived. The dropped (oxbow) original indices are then
+``set(range(orig_n)) - set(idx_map[:new_n])`` — used by the caller to
+locate and stamp FFCH mud plugs at the abandoned bend.
 """
 import numpy as np
 from numba import jit
 
 
 @jit(nopython=True)
-def make_cutoff(cx, cy, dlength, ctol):
-    """Modify cx/cy in place; return new ndis."""
+def _make_cutoff_core(cx, cy, dlength, ctol, idx_map):
     ndis = cx.size
     if ndis < 4:
         return ndis
@@ -44,6 +47,7 @@ def make_cutoff(cx, cy, dlength, ctol):
                     for j in range(jdis + 1, ndis):
                         cx[idis + count] = cx[j]
                         cy[idis + count] = cy[j]
+                        idx_map[idis + count] = idx_map[j]
                         count += 1
                     ndis = ndis - (jdis - idis)
                     cut_found = True
@@ -53,3 +57,15 @@ def make_cutoff(cx, cy, dlength, ctol):
         if not cut_found:
             break
     return ndis
+
+
+def make_cutoff(cx, cy, dlength, ctol, idx_map=None):
+    """Modify cx/cy in place; return new ndis.
+
+    If ``idx_map`` is provided (an int64 ndarray of size cx.size), it is
+    compacted alongside cx/cy so its leading ``new_n`` entries identify
+    which **original** indices survived the cutoff(s).
+    """
+    if idx_map is None:
+        idx_map = np.arange(cx.size, dtype=np.int64)
+    return _make_cutoff_core(cx, cy, dlength, ctol, idx_map)

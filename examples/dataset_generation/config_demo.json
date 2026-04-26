@@ -1,4 +1,5 @@
 {
+  "_comment_": "Demo config — small per-layer counts. Curated parameter set: only the knobs that visually change the reservoir, mirroring notebooks/interactive.ipynb. Channels mix the 5 Pyrcz-2004 presets via the 'preset' field; user-supplied params override preset defaults.",
   "output_dir": "/pscratch/sd/i/ilgar/georules_dataset_demo",
   "seed": 42,
   "shard_size": 10000,
@@ -23,7 +24,6 @@
         "rmax":         {"range": [50, 80]},
         "asp":          {"range": [1.0, 2.5]},
         "bouma_factor": {"range": [0, 2]},
-        "m":            {"value": 100},
         "upthinning":   {"choices": [true, false]}
       }
     },
@@ -42,43 +42,46 @@
     },
     "meandering": {
       "count": 2,
-      "sampling": "lhs",
+      "sampling": "sobol",
       "params": {
-        "channel_width":            {"range": [50, 300]},
-        "n_channels":               {"range": [4, 20], "type": "int"},
-        "depth_width_ratio":        {"range": [0.2, 0.6]},
-        "slope":                    {"range": [0.002, 0.02], "scale": "log"},
-        "meander_scale":            {"range": [0.8, 2.0]},
-        "migration_distance_ratio": {"range": [0.5, 2.0]},
-        "nlevel":                   {"range": [4, 10], "type": "int"},
-        "azimuth":                  {"range": [0, 360]}
+        "preset":          {"choices": ["PV_SHOESTRING", "CB_LABYRINTH", "SH_DISTAL", "SH_PROXIMAL"]},
+        "mCHsinu":         {"range": [1.15, 1.75]},
+        "mCHwdratio":      {"range": [8.0, 22.0]},
+        "mCHdepth":        {"range": [2.0, 5.0]},
+        "probAvulInside":  {"range": [0.02, 0.4]},
+        "mFFCHprop":       {"range": [0.0, 0.5]},
+        "mdistMigrate":    {"range": [15.0, 40.0]},
+        "NTGtarget":       {"range": [0.10, 0.50]},
+        "azimuth":         {"range": [0, 360]}
       }
     },
     "braided": {
       "count": 2,
       "sampling": "sobol",
       "params": {
-        "braidplain_width":         {"range": [500, 3000]},
-        "n_channels":               {"range": [15, 35], "type": "int"},
-        "slope":                    {"range": [0.005, 0.03], "scale": "log"},
-        "meander_scale":            {"range": [0.5, 1.5]},
-        "migration_distance_ratio": {"range": [0.1, 0.6]},
-        "azimuth":                  {"range": [0, 360]}
+        "preset":          {"value": "CB_JIGSAW"},
+        "mCHsinu":         {"range": [1.10, 1.40]},
+        "mCHwdratio":      {"range": [12.0, 22.0]},
+        "mCHdepth":        {"range": [2.5, 4.0]},
+        "probAvulInside":  {"range": [0.20, 0.55]},
+        "mFFCHprop":       {"range": [0.2, 0.7]},
+        "NTGtarget":       {"range": [0.20, 0.45]},
+        "azimuth":         {"range": [0, 360]}
       }
     },
     "delta": {
       "count": 2,
       "sampling": "sobol",
       "params": {
-        "feeder_width":          {"range": [30, 120]},
-        "n_generations":         {"range": [4, 10], "type": "int"},
-        "fan_angle_deg":         {"range": [60, 130]},
-        "bifurcation_depth":     {"range": [3, 6], "type": "int"},
-        "fan_asymmetry":         {"range": [-0.5, 0.5]},
-        "azimuth":               {"range": [0, 360]},
-        "apex_x_fraction":       {"range": [0.1, 0.4]},
+        "trunk_length_fraction": {"range": [0.2, 0.6]},
         "progradation_fraction": {"range": [0.0, 0.5]},
-        "trunk_length_factor":   {"range": [3.0, 8.0]}
+        "branch_spread_deg":     {"range": [0.0, 45.0]},
+        "n_generations":         {"range": [4, 12], "type": "int"},
+        "ntime_per_gen":         {"range": [40, 120], "type": "int"},
+        "mCHsinu":               {"range": [1.05, 1.30]},
+        "mFFCHprop":             {"range": [0.0, 0.4]},
+        "paint_mouth_bars":      {"choices": [true, false]},
+        "azimuth":               {"range": [0, 360]}
       }
     }
   }

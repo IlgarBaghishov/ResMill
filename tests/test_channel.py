@@ -48,35 +48,29 @@ def test_channel_perm_positive_where_active():
     assert (layer.perm_mat[layer.active == 1] > 0).all()
 
 
-# === Output mode (binary vs alluvsim) ===
+# === Facies output: 6-class Alluvsim codes everywhere ===
 
-def test_binary_mode_default():
+def test_facies_is_alluvsim_6class():
+    """``layer.facies`` always has Alluvsim codes (-1..4); active is the
+    binary 0/1 collapse derived from it."""
     layer = MeanderingChannelLayer(**GRID)
     layer.create_geology(seed=3)
-    # Default should be binary 0/1
-    assert set(np.unique(layer.facies)).issubset({0, 1})
-    # The 6-class array is always populated
-    assert hasattr(layer, "facies_alluvsim")
-    assert set(np.unique(layer.facies_alluvsim)).issubset({-1, 0, 1, 2, 3, 4})
+    assert set(np.unique(layer.facies)).issubset({-1, 0, 1, 2, 3, 4})
+    assert set(np.unique(layer.active)).issubset({0, 1})
+    assert ((layer.active == (layer.facies >= 1).astype(np.int8))).all()
+    # No legacy duplicate
+    assert not hasattr(layer, "facies_alluvsim")
 
 
-def test_alluvsim_mode_full_codes():
+def test_alluvsim_codes_with_splays():
+    """Turning on splays should make CS=1 appear in the facies array."""
     layer = MeanderingChannelLayer(**GRID)
-    layer.create_geology(seed=4, output_facies="alluvsim",
+    layer.create_geology(seed=4,
                          **{**PV_SHOESTRING, "mCSnum": 1.0, "stdevCSnum": 0.5,
                             "mCSnumlobe": 1.0, "stdevCSnumlobe": 0.5})
     codes = set(np.unique(layer.facies))
-    # Should at minimum produce FF, CH, LA, LV (CS only with mCSnum>0)
     assert -1 in codes  # FF
     assert 4 in codes   # CH
-    # active is the binary collapse
-    assert ((layer.active == (layer.facies >= 1).astype(np.int8))).all()
-
-
-def test_invalid_output_mode_raises():
-    layer = MeanderingChannelLayer(**GRID)
-    with pytest.raises(ValueError, match="output_facies"):
-        layer.create_geology(seed=0, output_facies="wat")
 
 
 # === Preset constants ===

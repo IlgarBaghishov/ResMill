@@ -6,6 +6,17 @@ import pytest
 from georules.plotting import plot_cube_slices, plot_slices, GEORULES_CMAP
 
 
+def _figure_after(fn):
+    """Run ``fn``; return whichever Figure was created (and clean up)."""
+    plt.close('all')
+    fn()
+    figs = [plt.figure(n) for n in plt.get_fignums()]
+    assert len(figs) == 1, f'expected exactly one figure, got {len(figs)}'
+    fig = figs[0]
+    plt.close('all')
+    return fig
+
+
 def test_plot_cube_slices_returns_fig():
     data = np.random.rand(10, 10, 5)
     fig, ax = plot_cube_slices(data)
@@ -13,11 +24,47 @@ def test_plot_cube_slices_returns_fig():
     plt.close(fig)
 
 
-def test_plot_slices_returns_fig():
+def test_plot_slices_creates_one_figure():
     data = np.random.rand(10, 10, 5)
-    fig, axes = plot_slices(data, axis=2)
+    fig = _figure_after(lambda: plot_slices(data, axis=2))
     assert fig is not None
-    plt.close(fig)
+
+
+def test_plot_slices_returns_none():
+    """plot_slices must return None so last-expr auto-display in Jupyter
+    doesn't double up with flush_figures."""
+    data = np.random.rand(10, 10, 5)
+    plt.close('all')
+    result = plot_slices(data, axis=2)
+    assert result is None
+    plt.close('all')
+
+
+def test_plot_slices_all_axes_default():
+    """No axis ⇒ 8 slices on each of X, Y, Z = 24 panels (+ a colorbar axis
+    for continuous data)."""
+    data = np.random.rand(16, 16, 16)
+    fig = _figure_after(lambda: plot_slices(data, title='all axes'))
+    # 24 slice panels + 1 horizontal colorbar axis (continuous mode)
+    assert len(fig.axes) == 25
+
+
+def test_plot_slices_alluvsim_auto_detect():
+    """An int ndarray with values ⊂ {-1..4} → Alluvsim mode auto-detected."""
+    arr = np.full((8, 8, 8), -1, dtype=np.int8)
+    arr[3, 3, :] = 4   # one CH ribbon
+    fig = _figure_after(lambda: plot_slices(arr, axis=2))
+    assert fig is not None
+
+
+def test_plot_slices_layer_auto_detect():
+    """A Layer-like with .facies attr → Alluvsim mode + per-facies summary."""
+    class _StubLayer:
+        facies = np.full((8, 8, 8), -1, dtype=np.int8)
+        facies[3, 3, :] = 4
+        active = (facies >= 1).astype(np.int8)
+    fig = _figure_after(lambda: plot_slices(_StubLayer()))
+    assert fig is not None
 
 
 def test_plot_cube_slices_with_zeros():
@@ -31,9 +78,8 @@ def test_plot_cube_slices_with_zeros():
 
 def test_plot_slices_axis_0():
     data = np.random.rand(10, 10, 5)
-    fig, axes = plot_slices(data, axis=0, indices=[0, 5, 9])
+    fig = _figure_after(lambda: plot_slices(data, axis=0, n_slices=3))
     assert fig is not None
-    plt.close(fig)
 
 
 def test_plot_mask_zeros_false():
@@ -46,9 +92,8 @@ def test_plot_mask_zeros_false():
     assert fig1 is not None
     plt.close(fig1)
 
-    fig2, axes2 = plot_slices(data, axis=2, mask_zeros=False)
+    fig2 = _figure_after(lambda: plot_slices(data, axis=2, mask_zeros=False))
     assert fig2 is not None
-    plt.close(fig2)
 
 
 def test_georules_cmap_registered():
@@ -67,6 +112,5 @@ def test_default_cmap_is_georules():
     assert fig is not None
     plt.close(fig)
 
-    fig2, axes2 = plot_slices(data, axis=2)
+    fig2 = _figure_after(lambda: plot_slices(data, axis=2))
     assert fig2 is not None
-    plt.close(fig2)

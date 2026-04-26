@@ -70,14 +70,14 @@ def build_channel(preset, layer_cls, seed=SEED):
     scale = GRID["z_len"] * 0.95 / z_max if z_max > 0 else 1.0
     kw["level_z"] = [z * scale for z in kw["level_z"]]
     kw["mCHsource"] = GRID["y_len"] / 2
-    kw.update(output_facies="alluvsim", seed=seed)
+    kw["seed"] = seed
     layer.create_geology(**kw)
     return layer
 
 
 def render(layer, title, out_path, n_xy_slices=4):
     """Render a reservoir as 4 XY slices + 1 XZ + 1 YZ in a single PNG."""
-    facies = layer.facies_alluvsim
+    facies = layer.facies
     nx, ny, nz = facies.shape
     cmap, norm = alluvsim_cmap()
     iz_indices = np.linspace(0, nz - 1, n_xy_slices, dtype=int)
@@ -155,7 +155,7 @@ def main():
     w = gr.MeanderingChannelLayer(**GRID)
     np.random.seed(0)
     w.create_geology(
-        output_facies="alluvsim", seed=0, ntime=15,
+        seed=0, ntime=15,
         nlevel=2, level_z=[3.0, 8.0], NTGtarget=0.10,
         probAvulOutside=0.10, probAvulInside=0.30,
         mLVdepth=0.5, mLVwidth=20, mLVheight=0.4,
@@ -164,7 +164,7 @@ def main():
     )
     # Warm matplotlib too
     fig, ax = plt.subplots(1, 1, figsize=(2, 2))
-    ax.imshow(w.facies_alluvsim[:, :, 5].T, cmap=alluvsim_cmap()[0])
+    ax.imshow(w.facies[:, :, 5].T, cmap=alluvsim_cmap()[0])
     plt.close(fig)
     del w
     t_warm = time.perf_counter() - t0

@@ -102,9 +102,8 @@ def run_alluvsim_preset(name: str, *, runs_dir: Path | None = None
 def run_georules_preset(name: str, params: dict) -> np.ndarray:
     """Build a GeoRules channel layer with Alluvsim params and return facies.
 
-    Returns the full 6-class Alluvsim facies array (``output_facies='alluvsim'``).
-    Currently the GeoRules engine only emits CH (and shale background); LA/LV/CS
-    will appear as elements get implemented in subsequent iteration steps.
+    Returns the full 6-class Alluvsim facies array from ``layer.facies``
+    (every channel layer now exposes the 6-class array uniformly).
 
     The mapping from Alluvsim's mCH*/stdevCH* names to GeoRules kwargs is done
     in this helper so the rewrite can keep evolving the layer constructor
@@ -140,13 +139,7 @@ def run_georules_preset(name: str, params: dict) -> np.ndarray:
     common_kwargs = _build_georules_kwargs(params)
     layer.create_geology(**common_kwargs)
 
-    # Engine writes binary 0/1 facies right now; the rewrite will add
-    # output_facies='alluvsim' so we get the full -1..4 codes.
-    if hasattr(layer, "facies_alluvsim"):
-        return layer.facies_alluvsim.astype(np.int8)
-    # Back-compat: current engine writes binary {0,1}; remap to {FF, CH} so
-    # the comparison harness still works pre-rewrite.
-    return np.where(layer.facies > 0, CH, FF).astype(np.int8)
+    return np.asarray(layer.facies).astype(np.int8)
 
 
 def _build_georules_kwargs(params: dict) -> dict:
@@ -204,8 +197,6 @@ def _build_georules_kwargs(params: dict) -> dict:
         gradient=params["gradient"], Q=params["Q"],
         # Pool
         CHndraw=params["CHndraw"], ndiscr=params["ndiscr"], nCHcor=params["nCHcor"],
-        # Output mode: full 6-class so the parity comparison sees per-facies counts.
-        output_facies="alluvsim",
         seed=params["seed"],
     )
 

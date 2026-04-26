@@ -119,12 +119,57 @@ class fluvial:
         mCSLO_dwratio: float = 0.02, stdevCSLO_dwratio: float = 0.005,
         # ---- abandoned-channel mud plug (FFCH) -------------------------
         mFFCHprop: float = 0.0, stdevFFCHprop: float = 0.0,
+        # Mud-plug fraction painted on the *neck-cutoff oxbow loop* every
+        # time ``make_cutoff`` excises a tight bend from the active
+        # centerline. 0.0 = pure Alluvsim behavior (the abandoned bend
+        # keeps its prior LA/CH stamps and is later overwritten as the
+        # new shorter centerline migrates). >0 = the cells of the dropped
+        # oxbow are converted to FFCH (mud plug) over the upper
+        # ``mNeckFFCHprop`` of their column at that node's CHelev — i.e.
+        # the oxbow lake fills with mud, exactly as a real abandoned
+        # bend does after a neck cutoff.
+        mNeckFFCHprop: float = 0.0,
         # ---- hydraulic — Alluvsim makepar central values --------------
         Cf: float = 0.0078, A: float = 2.0, I: float = 0.001, Q: float = 5.0,
         # ---- pool / discretisation -------------------------------------
         CHndraw: int = 50, ndiscr: int = 5, nCHcor: int = 10,
         # ---- back-compat (kept for DeltaLayer-style internal callers) --
         azimuth: float = 0.0,
+        # ---- delta extensions (used by DeltaLayer; harmless defaults) --
+        # Fraction of proximal streamline nodes protected from
+        # avulsion-inside splicing. 0.0 = no protection (Alluvsim
+        # default). >0 keeps the upstream trunk geometrically stable
+        # so it meanders as one channel before the fan starts to
+        # bifurcate downstream — exactly the architecture of a real
+        # delta-plain.
+        min_avul_node_frac: float = 0.0,
+        # Per-level x-offset of the streamline entry (for delta-style
+        # progradation). ``None`` = entry pinned at xmin every level
+        # (Alluvsim default). When supplied, the pool is rebuilt at
+        # each level with ``x0 = xmin + offset[ilevel]`` so the apex
+        # advances toward +flow as generations stack vertically — the
+        # classic clinoform-progradation architecture.
+        mCHentry_x_offset_per_level: list[float] | None = None,
+        # Standard deviation (in compass degrees) of the random perturbation
+        # added to ``local_azi`` when an avulsion-inside event launches a
+        # fresh AR(2) tail. 0.0 = Alluvsim default (tail launches along
+        # exact parent direction at the splice node); >0 spreads the new
+        # branches around the parent direction immediately at launch,
+        # giving direct control over the angular fan-out between sibling
+        # distributaries (used by DeltaLayer's ``branch_spread_deg``).
+        stdev_branch_azi: float = 0.0,
+        # When ``True``, ``ntime`` is interpreted as the per-level event
+        # cap and the global event counter is reset at the top of every
+        # level — so each of the ``nlevel`` levels gets its own full
+        # ``ntime`` event budget. Default ``False`` matches Alluvsim
+        # ``streamsim.for`` semantics (``ntime`` is the *total* event cap
+        # across all levels), which makes sense when the cumulative
+        # ``NTGtarget`` is the dominant exit criterion. For multi-level
+        # presets where each level is a stand-alone architectural unit
+        # (e.g. ``MEANDER_OXBOW`` stacking eight independent meander
+        # belts) this flag should be ``True`` so upper levels actually
+        # run instead of being starved by the lower levels.
+        ntime_per_level: bool = False,
         # ---- misc -------------------------------------------------------
         seed: int | None = None,
     ):
@@ -143,7 +188,17 @@ class fluvial:
         # Aggradation
         self.nlevel = int(nlevel)
         if level_z is None:
-            level_z = list(np.linspace(zsiz, nz * zsiz, self.nlevel))
+            # Default chelev spread: bottom level at z = mCHdepth so the
+            # bottom channel U fits fully inside the grid, top level at
+            # z = nz·zsiz so the topmost channel reaches the grid top.
+            # With ``nlevel ≥ ceil(nz·zsiz / mCHdepth)`` the column fills
+            # contiguously with no FF gap between adjacent levels.
+            z_top = float(nz * zsiz)
+            z_bot = max(zsiz, mCHdepth)
+            if self.nlevel == 1:
+                level_z = [z_top]
+            else:
+                level_z = list(np.linspace(z_bot, z_top, self.nlevel))
         self.level_z = [float(z) for z in level_z]
         if len(self.level_z) != self.nlevel:
             raise ValueError(
@@ -182,6 +237,8 @@ class fluvial:
         self.mCSLO_dwratio, self.stdevCSLO_dwratio = float(mCSLO_dwratio), float(stdevCSLO_dwratio)
 
         self.mFFCHprop, self.stdevFFCHprop = float(mFFCHprop), float(stdevFFCHprop)
+        self.mNeckFFCHprop = float(mNeckFFCHprop)
+        self.ntime_per_level = bool(ntime_per_level)
 
         # Hydraulic
         g = 9.8
@@ -195,6 +252,25 @@ class fluvial:
         self.CHndraw = int(CHndraw)
         self.ndiscr = int(ndiscr)
         self.nCHcor = int(nCHcor)
+
+        # Delta extensions (no-ops when at default values).
+        self.min_avul_node_frac = float(np.clip(min_avul_node_frac, 0.0, 0.95))
+        self.stdev_branch_azi = float(max(stdev_branch_azi, 0.0))
+        if mCHentry_x_offset_per_level is None:
+            self.mCHentry_x_offset_per_level = None
+        else:
+            offs = list(mCHentry_x_offset_per_level)
+            if len(offs) != self.nlevel:
+                raise ValueError(
+                    f"mCHentry_x_offset_per_level length {len(offs)} "
+                    f"!= nlevel {self.nlevel}")
+            self.mCHentry_x_offset_per_level = [float(v) for v in offs]
+        # Active entry-x offset; updated per level when progradation is on.
+        self._entry_x_offset = 0.0
+        # Endpoints of every streamline that ended up active at the
+        # close of a level — used by DeltaLayer to paint optional
+        # mouth-bar lobes at the prograding front.
+        self.distal_tips: list[tuple[float, float, float]] = []
 
         # Azimuth (back-compat with delta-style rotated stamping)
         self.azimuth_rad = float(np.deg2rad(azimuth))
@@ -326,7 +402,12 @@ class fluvial:
         return None, None
 
     def _sample_streamline(self):
-        """Sample (chazi, chsinu, y0) per Alluvsim ``buildCHtable.for:73-88``."""
+        """Sample (chazi, chsinu, y0) per Alluvsim ``buildCHtable.for:73-88``.
+
+        The streamline entry is ``(xmin + entry_x_offset, y0)`` — the
+        offset is 0 by default (Alluvsim semantics) and advances per
+        level when delta-style progradation is configured.
+        """
         chazi = float(np.random.normal(self.mCHazi, max(self.stdevCHazi, 1e-9)))
         chsinu = float(np.random.normal(self.mCHsinu, max(self.stdevCHsinu, 1e-9)))
         chsinu = float(np.clip(chsinu, 1.1, 1.9))
@@ -335,7 +416,7 @@ class fluvial:
             y0 = float(np.clip(y0, self.ymin, self.ymax))
         else:
             y0 = float(np.random.uniform(self.ymin, self.ymax))
-        x0 = self.xmin
+        x0 = self.xmin + self._entry_x_offset
         return x0, y0, chazi, chsinu
 
     def generate_streamline(self, x0=None, y0=None, chazi=None, chsinu=None) -> int:
@@ -649,9 +730,40 @@ class fluvial:
         self.cx[1:] = self.cx[1:] + usb[1:] * nx_perp[1:]
         self.cy[1:] = self.cy[1:] + usb[1:] * ny_perp[1:]
 
-        # Geometric neckcutoff (Alluvsim ``neckcutoff.for``)
+        # Geometric neckcutoff (Alluvsim ``neckcutoff.for``).
+        #
+        # Save the full pre-cutoff centerline (and aligned per-node arrays)
+        # before make_cutoff compacts cx/cy in place — when
+        # ``mNeckFFCHprop > 0`` we use them to paint the dropped oxbow
+        # loop as an FFCH mud plug ("neck cutoff → oxbow lake → mud
+        # plug" sequence visible in cross-section).
         thresh = self.maxCHhalfwidth * 3.0
-        new_n = make_cutoff(self.cx, self.cy, self.dlength, thresh)
+        n_pre = self.cx.size
+        cx_pre = self.cx.copy() if self.mNeckFFCHprop > 0.0 else None
+        cy_pre = self.cy.copy() if self.mNeckFFCHprop > 0.0 else None
+        vx_pre = self.vx.copy() if (self.mNeckFFCHprop > 0.0 and self.vx is not None) else None
+        vy_pre = self.vy.copy() if (self.mNeckFFCHprop > 0.0 and self.vy is not None) else None
+        thalweg_pre = (self.thalweg.copy()
+                        if (self.mNeckFFCHprop > 0.0 and self.thalweg is not None
+                            and self.thalweg.size == n_pre) else None)
+        chwidth_pre = (self._chwidth_arr.copy()
+                        if (self.mNeckFFCHprop > 0.0 and self._chwidth_arr is not None
+                            and self._chwidth_arr.size == n_pre) else None)
+        chelev_pre = (self.chelev_arr.copy()
+                       if (self.mNeckFFCHprop > 0.0 and self.chelev_arr is not None
+                           and self.chelev_arr.size == n_pre) else None)
+        idx_map = np.arange(n_pre, dtype=np.int64)
+        new_n = make_cutoff(self.cx, self.cy, self.dlength, thresh, idx_map)
+        if (self.mNeckFFCHprop > 0.0 and new_n < n_pre
+                and cx_pre is not None and vx_pre is not None
+                and thalweg_pre is not None and chwidth_pre is not None
+                and chelev_pre is not None):
+            self._stamp_neck_oxbows(
+                idx_map[:new_n], n_pre,
+                cx_pre, cy_pre, vx_pre, vy_pre,
+                thalweg_pre, chwidth_pre, chelev_pre,
+                self.mNeckFFCHprop,
+            )
         if new_n < 20:
             return 0
         self.cx = self.cx[:new_n].copy()
@@ -680,12 +792,26 @@ class fluvial:
         if n > 2:
             weights[0] = 0.0
             weights[-1] = 0.0
+        # Trunk protection (DeltaLayer): zero weights on the proximal
+        # ``min_avul_node_frac`` of nodes so the trunk meanders as a single
+        # channel before any avulsion-inside splice can fire — the new
+        # tail is always grafted onto the distal portion.
+        if self.min_avul_node_frac > 0.0 and n > 2:
+            n_protect = max(1, int(self.min_avul_node_frac * n))
+            n_protect = min(n_protect, n - 2)
+            weights[:n_protect] = 0.0
         if weights.sum() <= 1e-12:
-            ianode = int(np.random.randint(1, n - 1))
+            lo = max(1, int(self.min_avul_node_frac * n))
+            ianode = int(np.random.randint(lo, n - 1)) if lo < n - 1 else n - 2
         else:
             p = weights / weights.sum()
             ianode = int(np.random.choice(n, p=p))
         local_azi = float(self.azi[ianode])
+        # Direct branch-spread control (DeltaLayer ``branch_spread_deg``):
+        # perturb the new tail's launch azimuth by N(0, stdev_branch_azi).
+        # 0 ⇒ tail launches along parent direction (Alluvsim default).
+        if self.stdev_branch_azi > 0.0:
+            local_azi += float(np.random.normal(0.0, self.stdev_branch_azi))
         chsinu = float(getattr(self, '_chsinu', self.mCHsinu))
 
         # AR(2) tail from (cx[ianode], cy[ianode]) toward local_azi
@@ -961,6 +1087,68 @@ class fluvial:
             xmn=self.xmn, ymn=self.ymn, lk_lv=LV,
         )
 
+    def _stamp_neck_oxbows(self, surviving_idx, n_pre,
+                            cx_pre, cy_pre, vx_pre, vy_pre,
+                            thalweg_pre, chwidth_pre, chelev_pre,
+                            mud_prop):
+        """Paint each dropped neck-cutoff oxbow loop as an FFCH mud plug.
+
+        ``surviving_idx`` is the slice of the post-cutoff ``idx_map``
+        (original indices that survived). Any contiguous run of original
+        indices missing from that set is one oxbow loop — we rotate
+        (delta-mode) and slice the saved per-node arrays for that loop
+        and call ``paint_abandoned`` with ``mud_prop = mNeckFFCHprop``.
+        """
+        survive_set = set(int(i) for i in surviving_idx.tolist())
+        dropped_ranges = []
+        i = 0
+        while i < n_pre:
+            if i not in survive_set:
+                start = i
+                while i < n_pre and i not in survive_set:
+                    i += 1
+                dropped_ranges.append((start, i - 1))
+            else:
+                i += 1
+        if not dropped_ranges:
+            return
+
+        if self.azimuth_rad == 0.0:
+            cx_rot, cy_rot, vx_rot, vy_rot = cx_pre, cy_pre, vx_pre, vy_pre
+        else:
+            c, s = self._cos_az, self._sin_az
+            px, py = self._pivot_x, self._pivot_y
+            dx = cx_pre - px
+            dy = cy_pre - py
+            cx_rot = px + dx * c + dy * s
+            cy_rot = py - dx * s + dy * c
+            vx_rot = vx_pre * c + vy_pre * s
+            vy_rot = -vx_pre * s + vy_pre * c
+
+        for (lo, hi) in dropped_ranges:
+            # Pad by one node on each side so the loop's pinch points
+            # (the surviving idis and jdis+1) join smoothly with the
+            # new active centerline rather than leaving a 1-node gap.
+            s_idx = max(0, lo - 1)
+            e_idx = min(n_pre, hi + 2)
+            cx_l = cx_rot[s_idx:e_idx].copy()
+            cy_l = cy_rot[s_idx:e_idx].copy()
+            vx_l = vx_rot[s_idx:e_idx].copy()
+            vy_l = vy_rot[s_idx:e_idx].copy()
+            thalweg_l = thalweg_pre[s_idx:e_idx].copy()
+            chwidth_l = chwidth_pre[s_idx:e_idx].copy()
+            chelev_l = chelev_pre[s_idx:e_idx].copy()
+            if cx_l.size < 3:
+                continue
+            paint_abandoned(
+                float(chwidth_l.max()), cx_l, cy_l, vx_l, vy_l, thalweg_l,
+                chwidth_l, chelev_l, self.gr_dwratio, mud_prop,
+                self.x, self.y, self.xsiz, self.ysiz, self.zsiz,
+                self.nx, self.ny, self.nz, self.facies,
+                self.ntg_counter, self.ffch_counter,
+                xmn=self.xmn, ymn=self.ymn, lk_ffch=FFCH, lk_ch=CH,
+            )
+
     def _stamp_abandoned(self, mud_prop: float):
         if self.cx is None or self.cx.size < 3:
             return
@@ -986,6 +1174,12 @@ class fluvial:
 
     def simulation(self):
         """Per-level event loop — port of ``streamsim.for:737-1004``."""
+        # Per-level entry-x offset (used for delta-style progradation).
+        # When ``mCHentry_x_offset_per_level`` is None the offset stays
+        # at 0 throughout; otherwise we apply level 0's offset before
+        # building the pool so the proximal trunk position matches.
+        if self.mCHentry_x_offset_per_level is not None:
+            self._entry_x_offset = float(self.mCHentry_x_offset_per_level[0])
         # Build the streamline pool once at sim start (Alluvsim:702 buildCHtable)
         self._build_streamline_pool()
 
@@ -1003,6 +1197,19 @@ class fluvial:
         for ilevel in range(self.nlevel):
             self.chelev = float(self.level_z[ilevel])
             self.chelev_arr = np.full(self.ndis, self.chelev, dtype=np.float64)
+            # When ntime is per-level, reset the event counter so each level
+            # gets its own full ``ntime`` budget instead of being starved by
+            # whatever the lower levels consumed.
+            if self.ntime_per_level:
+                ev_counter = 0
+            # Progradation: shift entry x and rebuild the pool so all
+            # subsequent draws start at the new apex position.
+            if (self.mCHentry_x_offset_per_level is not None
+                    and ilevel > 0):
+                new_offset = float(self.mCHentry_x_offset_per_level[ilevel])
+                if new_offset != self._entry_x_offset:
+                    self._entry_x_offset = new_offset
+                    self._build_streamline_pool()
             # Always reseed at level top (item 2.20 — matches AL:727-731)
             if ilevel > 0:
                 if not self._draw_from_pool():
@@ -1069,7 +1276,20 @@ class fluvial:
 
             # End-of-level abandonment (AL:1002-1004)
             self._stamp_abandoned(last_ffchprop)
-            if ev_counter >= self.ntime:
+            # Record the distal tip of the active streamline at level
+            # close (x, y, chelev, heading). DeltaLayer optionally
+            # paints a calc_lobe mouth bar at every recorded tip.
+            if self.cx is not None and self.cx.size > 1:
+                head = float(np.arctan2(self.cy[-1] - self.cy[-2],
+                                         self.cx[-1] - self.cx[-2]))
+                self.distal_tips.append((
+                    float(self.cx[-1]), float(self.cy[-1]),
+                    float(self.chelev), head,
+                ))
+            # Stop the whole simulation only when ntime is global (Alluvsim
+            # default). With ``ntime_per_level=True`` each level gets a
+            # fresh budget and we always continue to the next level.
+            if not self.ntime_per_level and ev_counter >= self.ntime:
                 return
 
     # ----------------------------------------------------------------- helpers

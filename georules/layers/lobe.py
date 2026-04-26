@@ -93,14 +93,21 @@ class LobeLayer(Layer):
         self.poro_mat = flat.reshape(nx, ny, nz)
         self.perm_mat = perm_flat.reshape(nx, ny, nz)
 
-        self.active = self.active.astype(int)
+        self.active = self.active.astype(np.int8)
         self.poro_mat = self.poro_mat * self.active
         self.perm_mat = (10 ** self.perm_mat) * self.active
 
+        # ``lobe_id`` keeps the per-lobe stacking index (1..N) for users
+        # who want to colour by lobe generation. ``facies`` is the
+        # uniform Alluvsim-style code: -1 (FF, floodplain / shale) where
+        # inactive, 3 (LA = lateral-accretion / bar) where the cell
+        # belongs to a lobe — closest analogue to Alluvsim's bar
+        # facies for a turbidite-lobe deposit.
         if allfacies and len(allfacies) > 0:
-            self.facies = np.swapaxes(allfacies[-1].copy(), 0, -1).astype(int)
+            self.lobe_id = np.swapaxes(allfacies[-1].copy(), 0, -1).astype(np.int16)
         else:
-            self.facies = np.zeros((nx, ny, nz), dtype=int)
+            self.lobe_id = np.zeros((nx, ny, nz), dtype=np.int16)
+        self.facies = np.where(self.active == 1, 3, -1).astype(np.int8)
 
     def _lobemodeling(self, dhmax=4, dhmin=4, rmin=42, rmax=44, asp=1.5,
                       theta0=0, m=100, upthinning=True, bouma_factor=0):

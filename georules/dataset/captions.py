@@ -44,30 +44,40 @@ def _gaussian(p):
 
 def _meandering(p):
     return (
-        f"Meandering fluvial channel belt with {int(p['n_channels'])} channels "
-        f"of width {p['channel_width']:.0f} m, "
-        f"meander scale {p.get('meander_scale', 1.2):.2f}, "
-        f"slope {p.get('slope', 0.008):.4f}, "
-        f"migration distance ratio {p.get('migration_distance_ratio', 1.0):.2f}."
+        f"Meandering fluvial channel system, "
+        f"sinuosity {p.get('mCHsinu', 1.6):.2f}, "
+        f"channel depth {p.get('mCHdepth', 2.5):.1f} m, "
+        f"width:depth ratio {p.get('mCHwdratio', 10):.0f}, "
+        f"avulsion-inside probability {p.get('probAvulInside', 0.05):.2f}, "
+        f"abandoned-mud fraction {p.get('mFFCHprop', 0):.2f}, "
+        f"NTG target {p.get('NTGtarget', 0.10):.2f}, "
+        f"azimuth {p.get('azimuth', 0):.0f} deg."
     )
 
 
 def _braided(p):
     return (
-        f"Braided fluvial channel system with braidplain width "
-        f"{p['braidplain_width']:.0f} m, "
-        f"{int(p.get('n_channels', 24))} channels, "
-        f"slope {p.get('slope', 0.008):.4f}."
+        f"Braided fluvial channel system, "
+        f"sinuosity {p.get('mCHsinu', 1.3):.2f}, "
+        f"channel depth {p.get('mCHdepth', 3.0):.1f} m, "
+        f"width:depth ratio {p.get('mCHwdratio', 16):.0f}, "
+        f"avulsion-inside probability {p.get('probAvulInside', 0.40):.2f}, "
+        f"abandoned-mud fraction {p.get('mFFCHprop', 0.5):.2f}, "
+        f"NTG target {p.get('NTGtarget', 0.30):.2f}, "
+        f"azimuth {p.get('azimuth', 0):.0f} deg."
     )
 
 
 def _delta(p):
     return (
-        f"River-mouth delta with {int(p.get('n_generations', 8))} bifurcation "
-        f"generations, fan angle {p.get('fan_angle_deg', 95):.0f} deg, "
-        f"feeder width {p.get('feeder_width', 60):.0f} m, "
-        f"azimuth {p.get('azimuth', 0):.0f} deg, "
-        f"progradation {p.get('progradation_fraction', 0):.2f}."
+        f"Distributary-fan delta with "
+        f"{int(p.get('n_generations', 8))} stacked generations, "
+        f"trunk length fraction {p.get('trunk_length_fraction', 0.4):.2f}, "
+        f"progradation {p.get('progradation_fraction', 0):.2f}, "
+        f"sinuosity {p.get('mCHsinu', 1.10):.2f}, "
+        f"abandoned-mud fraction {p.get('mFFCHprop', 0):.2f}, "
+        f"mouth bars {'on' if p.get('paint_mouth_bars', False) else 'off'}, "
+        f"azimuth {p.get('azimuth', 0):.0f} deg."
     )
 
 
