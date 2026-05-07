@@ -1,7 +1,7 @@
-# GeoRules dataset generation on Perlmutter CPU
+# ResMill dataset generation on Perlmutter CPU
 
 Generate a large 3D reservoir dataset by sweeping the parameter space of
-every GeoRules layer type (Lobe, Gaussian, Meandering, Braided, Delta).
+every ResMill layer type (Lobe, Gaussian, Meandering, Braided, Delta).
 Designed for 1–10M samples on Perlmutter CPU nodes, with output staged
 for direct upload to HuggingFace and consumption by GenFlows.
 
@@ -38,25 +38,25 @@ between parallel workers.
 ### 1. Create the env (one-time)
 ```bash
 module load conda
-conda create -p /global/cfs/cdirs/m1883/ilgar/conda_envs/georules python=3.12 -y
-conda activate /global/cfs/cdirs/m1883/ilgar/conda_envs/georules
-pip install -e /global/cfs/cdirs/m1883/ilgar/codes/GeoRules
-pip install -e '/global/cfs/cdirs/m1883/ilgar/codes/GeoRules[dataset]'
+conda create -p /global/cfs/cdirs/m1883/ilgar/conda_envs/resmill python=3.12 -y
+conda activate /global/cfs/cdirs/m1883/ilgar/conda_envs/resmill
+pip install -e /global/cfs/cdirs/m1883/ilgar/codes/ResMill
+pip install -e '/global/cfs/cdirs/m1883/ilgar/codes/ResMill[dataset]'
 ```
 
 ### 2. Serial smoke test (10 samples, ~1 minute)
 ```bash
-conda activate /global/cfs/cdirs/m1883/ilgar/conda_envs/georules
-python -m georules.dataset.cli examples/dataset_generation/config_demo.json
+conda activate /global/cfs/cdirs/m1883/ilgar/conda_envs/resmill
+python -m resmill.dataset.cli examples/dataset_generation/config_demo.json
 ```
 Inspect one shard at
-`/pscratch/sd/$USER/georules_dataset_demo/shard_r0000_s000000/`.
+`/pscratch/sd/$USER/resmill_dataset_demo/shard_r0000_s000000/`.
 
 ### 3. 128-way parallel test on an interactive node (1000 samples)
 ```bash
 salloc -N 1 -C cpu -q interactive --ntasks-per-node 128 -t 00:30:00 -A m1883
 srun -n 128 --cpu-bind=cores \
-     python -m georules.dataset.cli examples/dataset_generation/config_parallel_test.json
+     python -m resmill.dataset.cli examples/dataset_generation/config_parallel_test.json
 ```
 
 ### 4. Full run (10M samples, ~19 h wall on 4 nodes — default)
@@ -138,7 +138,7 @@ import numpy as np, pyarrow.parquet as pq, torch
 from pathlib import Path
 from torch.utils.data import Dataset
 
-class GeoRulesDataset(Dataset):
+class ResMillDataset(Dataset):
     def __init__(self, root):
         self.shards = sorted(Path(root).glob("shard_r*_s*"))
         self.lens = [np.load(s / "facies.npy", mmap_mode="r").shape[0]
@@ -161,8 +161,8 @@ class GeoRulesDataset(Dataset):
 ## Uploading to HuggingFace
 
 ```bash
-huggingface-cli upload <user>/georules-reservoirs \
-    /pscratch/sd/$USER/georules_dataset --repo-type dataset
+huggingface-cli upload <user>/resmill-reservoirs \
+    /pscratch/sd/$USER/resmill_dataset --repo-type dataset
 ```
 
 `params.parquet` is natively readable by `datasets.load_dataset("parquet", ...)`.
@@ -172,7 +172,7 @@ huggingface-cli upload <user>/georules-reservoirs \
 A small fraction (~0.04%) of parameter combinations trigger pre-existing
 bugs in the underlying layer code — typically `BraidedChannelLayer` /
 `MeanderingChannelLayer` hitting degenerate channel geometry that breaks
-a scipy `UnivariateSpline` fit in `georules/layers/_fluvial.py`. The CLI
+a scipy `UnivariateSpline` fit in `resmill/layers/_fluvial.py`. The CLI
 catches these, skips the sample, and records the full context (layer
 type, seed, parameter values, exception) to
 `{output_dir}/failures_r{rank:04d}.jsonl`. Failures are not fatal; 1M
@@ -192,9 +192,9 @@ runs should yield ~999,600 good samples.
   internally, which ignores `np.random.seed()`. Delta samples remain
   stochastic and diverse, but cannot be exactly regenerated from the
   `seed` column alone. Fixing this requires a one-line edit to
-  `georules/layers/delta.py`.
-- **Library bugs with inf/NaN in perm/poro**: `georules/layers/lobe.py`
-  and `georules/layers/gaussian.py` occasionally produce `inf * 0 = NaN`
+  `resmill/layers/delta.py`.
+- **Library bugs with inf/NaN in perm/poro**: `resmill/layers/lobe.py`
+  and `resmill/layers/gaussian.py` occasionally produce `inf * 0 = NaN`
   on masked cells. The generator sanitizes these in
-  `georules/dataset/generate.py::generate_sample` (via `nan_to_num` +
+  `resmill/dataset/generate.py::generate_sample` (via `nan_to_num` +
   float16 range clip) so on-disk arrays are always finite.

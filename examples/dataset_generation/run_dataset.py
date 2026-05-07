@@ -2,7 +2,7 @@
 
 Thin parallel driver around the same ``build_jobs`` + ``generate_sample``
 + ``ShardWriter`` code path that the SLURM CLI uses
-(``georules.dataset.cli``); the only difference is we shard the joblist
+(``resmill.dataset.cli``); the only difference is we shard the joblist
 across a ``multiprocessing.Pool`` instead of across MPI ranks, so it
 runs without ``srun`` / ``salloc``.
 
@@ -27,9 +27,9 @@ from pathlib import Path
 
 import numpy as np
 
-from georules.dataset.generate import generate_sample
-from georules.dataset.io import ShardWriter
-from georules.dataset.sampling import build_jobs
+from resmill.dataset.generate import generate_sample
+from resmill.dataset.io import ShardWriter
+from resmill.dataset.sampling import build_jobs
 
 
 def _gen(args):

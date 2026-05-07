@@ -1,6 +1,6 @@
 {
   "_comment_": "Distributary-fan delta architecture, driven by DeltaLayer (= prograding multi-generation fluvial engine with DELTA_FAN baseline). Single-channel trunk meanders before bifurcating into distributaries; generations stack vertically with optional progradation. See header of config_full_pv_shoestring.json for the comment-tag convention. NOTE: delta DELTA_FAN baseline differs significantly from the meandering presets \u2014 most overrides come from the preset, comments reflect this.",
-  "output_dir": "/pscratch/sd/i/ilgar/georules_dataset/delta",
+  "output_dir": "/pscratch/sd/i/ilgar/resmill_dataset/delta",
   "seed": 42,
   "shard_size": 1000,
   "grid": {

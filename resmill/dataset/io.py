@@ -10,7 +10,7 @@ Two parquet files are written per shard:
 
 * ``params.parquet`` — full schema, every meta key, for reproducibility.
 * ``params_slim.parquet`` — only the columns flow-matching training uses
-  (whitelist defined in :mod:`georules.dataset.schemas`). Both are
+  (whitelist defined in :mod:`resmill.dataset.schemas`). Both are
   per-row aligned with the ``facies.npy`` / ``poro.npy`` / ``perm.npy`` /
   ``facies_alluvsim.npy`` arrays.
 """

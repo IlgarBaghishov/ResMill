@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
-from georules.layers.gaussian import GaussianLayer
-from georules.layers.base import Layer
-from georules.reservoir import Reservoir
+from resmill.layers.gaussian import GaussianLayer
+from resmill.layers.base import Layer
+from resmill.reservoir import Reservoir
 
 
 def _make_gaussian(nx, ny, nz, top_depth, z_len, dip=0):

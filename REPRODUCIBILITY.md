@@ -12,16 +12,16 @@ The configs that produced it live in `examples/dataset_generation/config_full_*.
 ## 1. Quickstart
 
 ```bash
-git clone https://github.com/ElnaraRustamzade/GeoRules.git
-cd GeoRules
+git clone https://github.com/ElnaraRustamzade/ResMill.git
+cd ResMill
 pip install -e ".[dev]"
 ```
 
 Verify the engine works on a single sample:
 
 ```python
-import georules as gr
-from georules.layers.channel import PV_SHOESTRING
+import resmill as gr
+from resmill.layers.channel import PV_SHOESTRING
 
 layer = gr.ChannelLayer(nx=64, ny=64, nz=32,
                         x_len=640, y_len=640, z_len=32, top_depth=0)
@@ -49,8 +49,8 @@ Total: 184 node-hours on Perlmutter CPU + ~50 GB scratch I/O.
 ### 2a. Run the 8 SLURM jobs
 
 `examples/dataset_generation/run_*.sh` are the production scripts. Each one:
-- Loads the `georules` conda env
-- Runs `srun python -m georules.dataset.cli config_full_<preset>.json`
+- Loads the `resmill` conda env
+- Runs `srun python -m resmill.dataset.cli config_full_<preset>.json`
 - Each MPI rank handles its rank-stripe of the 1M-job list and writes shards to `/pscratch/.../<output_dir>/shard_r{rank}_s{shard_idx}/`
 
 Submit in any order (independent jobs):
@@ -76,7 +76,7 @@ Per-preset breakdown (matches the published dataset):
 | `run_meander_oxbow.sh` | 8 × 4h | 64 | 100,000 |
 | `run_delta.sh` | 16 × 10h | 192 (used ~33 in practice) | 150,000 |
 
-Outputs land at `/pscratch/sd/i/ilgar/georules_dataset/<output_dir>/` (configurable via the `output_dir` field of each `config_full_*.json`).
+Outputs land at `/pscratch/sd/i/ilgar/resmill_dataset/<output_dir>/` (configurable via the `output_dir` field of each `config_full_*.json`).
 
 ### 2b. Combine shards into the final 256-shard-per-preset layout
 
@@ -84,7 +84,7 @@ Rank-shards (512–2048 per preset, one per MPI rank) are too granular for typic
 
 ```bash
 python examples/dataset_generation/combine_shards.py \
-    --root /pscratch/sd/i/ilgar/georules_dataset \
+    --root /pscratch/sd/i/ilgar/resmill_dataset \
     --target 256 \
     --workers 32
 ```
@@ -111,7 +111,7 @@ Produces `train.parquet`, `validation.parquet`, `test.parquet` — one row per s
 ```bash
 # Symlinks to combined data + the staged READMEs + splits
 DST=/pscratch/sd/i/ilgar/SiliciclasticReservoirs
-SRC=/pscratch/sd/i/ilgar/georules_dataset
+SRC=/pscratch/sd/i/ilgar/resmill_dataset
 declare -A MAP=(
   [lobe]=lobes_combined
   [channel_pv_shoestring]=channels_pv_shoestring_combined
@@ -142,7 +142,7 @@ Every sample's `params.parquet` row carries the seed and full physics parameters
 ```python
 import pyarrow.parquet as pq
 import numpy as np
-import georules as gr
+import resmill as gr
 
 # Pick a sample from a shard
 row = pq.read_table(
@@ -183,7 +183,7 @@ Quick sanity check on any shard dir:
 
 ```bash
 python examples/dataset_generation/plot_dataset.py \
-    /pscratch/sd/i/ilgar/georules_dataset/delta \
+    /pscratch/sd/i/ilgar/resmill_dataset/delta \
     --workers 32 --limit 100
 ```
 
@@ -193,7 +193,7 @@ Per-layer-type summary stats:
 
 ```bash
 python examples/dataset_generation/plot_dataset_stats.py \
-    /pscratch/sd/i/ilgar/georules_dataset/delta
+    /pscratch/sd/i/ilgar/resmill_dataset/delta
 ```
 
 Produces `stats_pictures/stats_delta.png` with NTG / poro / perm / geometry histograms + slim-column correlation heatmap.
@@ -209,24 +209,24 @@ bash examples/dataset_generation/replot_all_test_subsets.sh
 
 For developers who want to understand or extend the engine:
 
-- **`georules/layers/_fluvial.py`** — main fluvial-engine class. AR(2) walks (Pyrcz-Sun streamline model), avulsion-inside (anchored to `mCHazi`), neck cutoff, level aggradation, per-event K-C draws.
-- **`georules/layers/_genchannel.py`** — Numba-JIT kernel that paints one streamline's U-shape; writes per-cell `depth_norm` for upward-fining ramp.
-- **`georules/layers/_genabandoned.py`** — abandoned-channel mud plug (FFCH).
-- **`georules/layers/_calc_levee.py`** — natural-levee (LV) painter.
-- **`georules/layers/_calc_lobe_splay.py`** — crevasse-splay (CS) painters.
-- **`georules/layers/_make_cutoff.py`** — neck cutoff geometry.
-- **`georules/layers/channel.py`** — `ChannelLayer` (drives the engine, hosts `FACIES_PROPS`, applies per-event ramp + per-realization mults in `_finalize_facies_table`).
-- **`georules/layers/delta.py`** — `DeltaLayer` (subclass driving `n_generations` independent fluvial sims merged by max-facies takeover; per-cell aux fields propagate from the winning generation).
-- **`georules/layers/lobe.py`** — `LobeLayer` (separate non-fluvial implementation: stamped ellipsoidal turbidite lobes + Gaussian poro field).
+- **`resmill/layers/_fluvial.py`** — main fluvial-engine class. AR(2) walks (Pyrcz-Sun streamline model), avulsion-inside (anchored to `mCHazi`), neck cutoff, level aggradation, per-event K-C draws.
+- **`resmill/layers/_genchannel.py`** — Numba-JIT kernel that paints one streamline's U-shape; writes per-cell `depth_norm` for upward-fining ramp.
+- **`resmill/layers/_genabandoned.py`** — abandoned-channel mud plug (FFCH).
+- **`resmill/layers/_calc_levee.py`** — natural-levee (LV) painter.
+- **`resmill/layers/_calc_lobe_splay.py`** — crevasse-splay (CS) painters.
+- **`resmill/layers/_make_cutoff.py`** — neck cutoff geometry.
+- **`resmill/layers/channel.py`** — `ChannelLayer` (drives the engine, hosts `FACIES_PROPS`, applies per-event ramp + per-realization mults in `_finalize_facies_table`).
+- **`resmill/layers/delta.py`** — `DeltaLayer` (subclass driving `n_generations` independent fluvial sims merged by max-facies takeover; per-cell aux fields propagate from the winning generation).
+- **`resmill/layers/lobe.py`** — `LobeLayer` (separate non-fluvial implementation: stamped ellipsoidal turbidite lobes + Gaussian poro field).
 
 The dataset pipeline:
 
-- **`georules/dataset/sampling.py`** — Sobol/LHS/grid/uniform JobList builder with shared/jitter/derived spec types.
-- **`georules/dataset/generate.py`** — `generate_sample(job, grid_cfg)` → `(facies, poro, perm, facies_alluvsim, meta)`.
-- **`georules/dataset/io.py`** — `ShardWriter` per-rank shard writer (writes 4 npy + 2 parquet atomically).
-- **`georules/dataset/cli.py`** — SLURM rank-stripe entry point.
-- **`georules/dataset/schemas.py`** — slim parquet column whitelist per layer family.
-- **`georules/dataset/captions.py`** — natural-language caption template per layer family.
+- **`resmill/dataset/sampling.py`** — Sobol/LHS/grid/uniform JobList builder with shared/jitter/derived spec types.
+- **`resmill/dataset/generate.py`** — `generate_sample(job, grid_cfg)` → `(facies, poro, perm, facies_alluvsim, meta)`.
+- **`resmill/dataset/io.py`** — `ShardWriter` per-rank shard writer (writes 4 npy + 2 parquet atomically).
+- **`resmill/dataset/cli.py`** — SLURM rank-stripe entry point.
+- **`resmill/dataset/schemas.py`** — slim parquet column whitelist per layer family.
+- **`resmill/dataset/captions.py`** — natural-language caption template per layer family.
 
 ---
 
@@ -258,12 +258,12 @@ If you use this dataset or engine, please cite:
   howpublished = {\url{https://huggingface.co/datasets/SciLM-ai/SiliciclasticReservoirs}}
 }
 
-@software{georules_engine_2026,
+@software{resmill_engine_2026,
   author       = {Baghishov, Ilgar},
-  title        = {{GeoRules}: Rule-Based Synthetic 3D Reservoir Geology Engine},
+  title        = {{ResMill}: Rule-Based Synthetic 3D Reservoir Geology Engine},
   year         = {2026},
   publisher    = {GitHub},
-  howpublished = {\url{https://github.com/ElnaraRustamzade/GeoRules}}
+  howpublished = {\url{https://github.com/ElnaraRustamzade/ResMill}}
 }
 ```
 
@@ -282,4 +282,4 @@ The engine builds on the streamline-based fluvial architecture by Pyrcz & Deutsc
 
 ## Issues / Contact
 
-File issues at [`github.com/ElnaraRustamzade/GeoRules/issues`](https://github.com/ElnaraRustamzade/GeoRules/issues).
+File issues at [`github.com/ElnaraRustamzade/ResMill/issues`](https://github.com/ElnaraRustamzade/ResMill/issues).

@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 
-from georules.layers.delta import DeltaLayer
+from resmill.layers.delta import DeltaLayer
 
 
 def _make_layer(**kwargs):
@@ -96,8 +96,8 @@ def test_delta_azimuth_rotates_fan():
 
 
 def test_delta_in_reservoir():
-    from georules.layers.gaussian import GaussianLayer
-    from georules.reservoir import Reservoir
+    from resmill.layers.gaussian import GaussianLayer
+    from resmill.reservoir import Reservoir
 
     g = GaussianLayer(nx=64, ny=64, nz=8, x_len=64 * 16, y_len=64 * 16,
                       z_len=24, top_depth=1000)

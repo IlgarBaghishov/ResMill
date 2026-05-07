@@ -1,6 +1,6 @@
 {
   "_comment_": "SH_DISTAL (Pyrcz 2004) \u2014 sand-rich distal sheet architecture; high NTG, wide stacked channel sheets with thick prominent levees, very rare avulsion. See header of config_full_pv_shoestring.json for the comment-tag convention used here ('skip \u2014 preset default' / 'skip \u2014 class default' / 'VARIED').",
-  "output_dir": "/pscratch/sd/i/ilgar/georules_dataset/channels_sh_distal",
+  "output_dir": "/pscratch/sd/i/ilgar/resmill_dataset/channels_sh_distal",
   "seed": 42,
   "shard_size": 1000,
   "grid": {

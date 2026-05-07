@@ -246,7 +246,7 @@ class ChannelLayer(Layer):
         Notable mappings:
 
         * ``mCHwdratio`` is Alluvsim's full width / depth ratio (so 10
-          means a 10:1 W:D channel). GeoRules converts internally to
+          means a 10:1 W:D channel). ResMill converts internally to
           ``depth / half_width``.
         * Default kwargs reproduce a PV-shoestring-ish reservoir on a
           typical 64-cell grid; override individual params or pass

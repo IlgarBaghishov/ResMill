@@ -1,7 +1,7 @@
 """Delta layer — distributary-fan architecture (Alluvsim fluvial engine).
 
 :py:class:`DeltaLayer` is a thin subclass of
-:py:class:`~georules.layers.channel.ChannelLayer` that drives
+:py:class:`~resmill.layers.channel.ChannelLayer` that drives
 the full Alluvsim event-loop fluvial engine (AR(2) walks +
 Sun-1996 bank-retreat migration + avulsion-inside + neck cutoff + level
 aggradation) with delta-tuned defaults (:data:`DELTA_FAN` preset).

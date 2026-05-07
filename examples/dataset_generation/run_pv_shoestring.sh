@@ -5,7 +5,7 @@
 #SBATCH --ntasks-per-node=128
 #SBATCH --cpus-per-task=2
 #SBATCH -t 2:00:00
-#SBATCH -J georules_pv_shoestring
+#SBATCH -J resmill_pv_shoestring
 #SBATCH --licenses=cfs,SCRATCH
 #SBATCH -A m1883
 #SBATCH -o logs/%x-%j.out
@@ -26,8 +26,8 @@ export OPENBLAS_NUM_THREADS=1
 export PYTHONUNBUFFERED=1
 
 module load conda
-conda activate /global/cfs/cdirs/m1883/ilgar/conda_envs/georules
+conda activate /global/cfs/cdirs/m1883/ilgar/conda_envs/resmill
 
-CFG="/global/cfs/cdirs/m1883/ilgar/codes/GeoRules/examples/dataset_generation/config_full_pv_shoestring.json"
+CFG="/global/cfs/cdirs/m1883/ilgar/codes/ResMill/examples/dataset_generation/config_full_pv_shoestring.json"
 
-srun --cpu-bind=cores python -m georules.dataset.cli "$CFG"
+srun --cpu-bind=cores python -m resmill.dataset.cli "$CFG"

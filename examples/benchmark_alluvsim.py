@@ -6,7 +6,7 @@ from VS Code's notebook overhead.
 
 Usage::
 
-    cd /home/ilgar/GeoRules
+    cd /home/ilgar/ResMill
     python examples/benchmark_alluvsim.py
 
 Outputs:
@@ -31,8 +31,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 
-import georules as gr
-from georules.layers.channel import (
+import resmill as gr
+from resmill.layers.channel import (
     PV_SHOESTRING, CB_JIGSAW, CB_LABYRINTH, SH_DISTAL, SH_PROXIMAL,
 )
 
@@ -137,7 +137,7 @@ def system_info():
     except ImportError:
         print(f"  Numba       : NOT INSTALLED")
     print(f"  Matplotlib  : {matplotlib.__version__}  (backend={matplotlib.get_backend()})")
-    print(f"  GeoRules    : (loaded from {Path(gr.__file__).resolve()})")
+    print(f"  ResMill    : (loaded from {Path(gr.__file__).resolve()})")
     print()
 
 

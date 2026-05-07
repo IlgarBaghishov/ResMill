@@ -1,4 +1,4 @@
-"""GeoRules: Rule-based 3D geological reservoir modeling."""
+"""ResMill: Rule-based 3D geological reservoir modeling."""
 
 __version__ = "0.1.0"
 
@@ -9,4 +9,4 @@ from .reservoir import Reservoir
 from .plotting import (plot_cube_slices, plot_slices, plot_layer, plot_reservoir,
                        alluvsim_cmap, alluvsim_legend_handles,
                        ALLUVSIM_FACIES_NAMES, ALLUVSIM_FACIES_COLORS,
-                       GEORULES_CMAP)
+                       RESMILL_CMAP)

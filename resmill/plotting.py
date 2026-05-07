@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import Normalize, LinearSegmentedColormap, ListedColormap, BoundaryNorm
 
 # ---------------------------------------------------------------------------
-# Unified GeoRules colormap: grey → yellow → orange/brown
+# Unified ResMill colormap: grey → yellow → orange/brown
 #
 # Maps linearly from reservoir-quality 0 (worst) to max (best):
 #   0.0  →  grey    (#999999)   — shale / inactive / zero porosity
@@ -16,18 +16,18 @@ from matplotlib.colors import Normalize, LinearSegmentedColormap, ListedColormap
 #   • Discrete facies (0=shale, 1=bar, 2=channel) with mask_zeros=False
 #     — 0 maps to grey, 1 to yellow, 2 to brown/orange
 # ---------------------------------------------------------------------------
-GEORULES_CMAP = LinearSegmentedColormap.from_list(
-    'georules',
+RESMILL_CMAP = LinearSegmentedColormap.from_list(
+    'resmill',
     ['#999999', '#e8c840', '#b85a18'],
     N=256,
 )
 
-DEFAULT_CMAP = 'georules'
-# Register so plt.get_cmap('georules') works everywhere
+DEFAULT_CMAP = 'resmill'
+# Register so plt.get_cmap('resmill') works everywhere
 try:
-    plt.colormaps.register(GEORULES_CMAP, name='georules', force=True)
+    plt.colormaps.register(RESMILL_CMAP, name='resmill', force=True)
 except AttributeError:
-    plt.register_cmap(name='georules', cmap=GEORULES_CMAP)
+    plt.register_cmap(name='resmill', cmap=RESMILL_CMAP)
 
 
 def plot_cube_slices(data, ix=None, iy=None, iz=None,
@@ -36,7 +36,7 @@ def plot_cube_slices(data, ix=None, iy=None, iz=None,
     """Plot 3 orthogonal slices arranged as faces of a cube.
 
     Mode is auto-detected from ``data``:
-      * a GeoRules ``Layer`` → uses ``layer.facies`` with the discrete
+      * a ResMill ``Layer`` → uses ``layer.facies`` with the discrete
         Alluvsim 6-class colormap (every layer now exposes a uniform
         ``facies`` array)
       * an integer ndarray with values ⊂ {-1..4} → Alluvsim mode
@@ -45,7 +45,7 @@ def plot_cube_slices(data, ix=None, iy=None, iz=None,
 
     Parameters
     ----------
-    data : (nx, ny, nz) ndarray  OR  a GeoRules Layer
+    data : (nx, ny, nz) ndarray  OR  a ResMill Layer
     ix, iy, iz : int or None
         Slice indices for the YZ / XZ / XY faces of the cube. Default
         is the **mid-slice** of each axis (``nx // 2``, etc.). Pass
@@ -216,7 +216,7 @@ def alluvsim_legend_handles():
 
 
 def _detect_mode(data):
-    """Pick a render mode from a GeoRules Layer or a raw ndarray.
+    """Pick a render mode from a ResMill Layer or a raw ndarray.
 
     Returns ``(mode, arr)`` where ``mode`` is one of
     ``'alluvsim'`` (discrete 6-class), ``'binary'`` (0/1) or
@@ -245,13 +245,13 @@ def _detect_mode(data):
 def plot_slices(data, axis=None, n_slices=8, ncols=None,
                 cmap=None, vmin=None, vmax=None, title=None,
                 mask_zeros=True):
-    """Plot 2D slices of a 3D array or a GeoRules Layer.
+    """Plot 2D slices of a 3D array or a ResMill Layer.
 
-    The single multi-panel viewer for any GeoRules layer or array.
+    The single multi-panel viewer for any ResMill layer or array.
 
     **Mode is auto-detected** from the input:
 
-    * a GeoRules ``Layer`` → uses ``layer.facies`` (Alluvsim 6-class
+    * a ResMill ``Layer`` → uses ``layer.facies`` (Alluvsim 6-class
       array — every layer now exposes a uniform ``facies`` array) with
       the discrete Alluvsim colormap, embedded legend, and per-facies
       fraction breakdown printed below the figure.
@@ -263,7 +263,7 @@ def plot_slices(data, axis=None, n_slices=8, ncols=None,
 
     Parameters
     ----------
-    data : ndarray (nx, ny, nz)  OR  a GeoRules Layer
+    data : ndarray (nx, ny, nz)  OR  a ResMill Layer
     axis : 0 | 1 | 2 | None
         ``None`` (default): plot ``n_slices`` slices along **each of
         the three axes**. 0 / 1 / 2: plot ``n_slices`` slices along
@@ -294,7 +294,7 @@ def plot_slices(data, axis=None, n_slices=8, ncols=None,
         plot_kw = dict(cmap=cm, norm=norm, interpolation='nearest', origin='lower')
         footer = ('legend', None)
     elif mode == 'binary':
-        plot_kw = dict(cmap=GEORULES_CMAP, vmin=0, vmax=1, origin='lower',
+        plot_kw = dict(cmap=RESMILL_CMAP, vmin=0, vmax=1, origin='lower',
                        interpolation='nearest')
     else:
         if cmap is None: cmap = DEFAULT_CMAP

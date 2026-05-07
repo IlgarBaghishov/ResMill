@@ -185,7 +185,7 @@ def verify(preset_dir: Path, out_dir: Path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--root", default="/pscratch/sd/i/ilgar/georules_dataset")
+    ap.add_argument("--root", default="/pscratch/sd/i/ilgar/resmill_dataset")
     ap.add_argument("--target", type=int, default=256,
                     help="target number of combined shards per preset")
     ap.add_argument("--workers", type=int, default=32)

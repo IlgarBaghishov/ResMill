@@ -1,6 +1,6 @@
 {
   "_comment_": "CB_JIGSAW (Pyrcz 2004) \u2014 braided channel-belt architecture. Driven by BraidedChannelLayer (= MeanderingChannelLayer with CB_JIGSAW defaults). Shallow wide channels with aggressive in-belt avulsion stack many channels per level, prominent FFCH mud plugs separate the bars to give the jigsaw signature. See header of config_full_pv_shoestring.json for the comment-tag convention.",
-  "output_dir": "/pscratch/sd/i/ilgar/georules_dataset/channels_cb_jigsaw",
+  "output_dir": "/pscratch/sd/i/ilgar/resmill_dataset/channels_cb_jigsaw",
   "seed": 42,
   "shard_size": 1000,
   "grid": {

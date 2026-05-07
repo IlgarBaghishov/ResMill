@@ -1,25 +1,25 @@
-# GeoRules
+# ResMill
 
 Rule-based 3D geological reservoir modeling.
 
 ## Install
 
 ```bash
-pip install georules
+pip install resmill
 ```
 
 For development:
 
 ```bash
-git clone https://github.com/ElnaraRustamzade/GeoRules.git
-cd GeoRules
+git clone https://github.com/ElnaraRustamzade/ResMill.git
+cd ResMill
 pip install -e ".[dev]"
 ```
 
 ## Quick Start
 
 ```python
-import georules as gr
+import resmill as gr
 
 # Create a turbidite lobe layer
 lobe = gr.LobeLayer(nx=100, ny=100, nz=50, x_len=3000, y_len=3000, z_len=100, top_depth=5000)

@@ -1,13 +1,13 @@
 """Plot facies / porosity / permeability slices for every sample in a
 dataset shard directory.
 
-Reads shards produced by ``georules.dataset.cli`` / ``run_dataset.py``
+Reads shards produced by ``resmill.dataset.cli`` / ``run_dataset.py``
 (each shard is a directory with ``facies.npy`` + ``poro.npy`` +
 ``perm.npy`` + ``params.parquet``) and writes one PNG per sample with
 4 slices along each of the 3 axes (X, Y, Z), the caption from the
 parquet, and every parameter column dumped as a monospace footer.
 
-Reuses ``georules.plotting.plot_slices`` for the slice grid; the
+Reuses ``resmill.plotting.plot_slices`` for the slice grid; the
 function auto-detects binary (facies) vs continuous (poro/perm) mode
 from the dtype. Permeability is plotted on a log10 scale because mD
 spans several decades.
@@ -37,7 +37,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pyarrow.parquet as pq
 
-from georules.plotting import plot_slices
+from resmill.plotting import plot_slices
 
 
 _PROP_DIR = {
@@ -112,7 +112,7 @@ def _render_one(task):
     # run without a data re-gen. We try the saved ``preset`` field
     # first (added by recent generate.py runs); if absent (older shards)
     # the channel/delta caption falls back to the generic head.
-    from georules.dataset.captions import caption_for
+    from resmill.dataset.captions import caption_for
     layer_type = meta.get("layer_type", "channel")
     caption = caption_for(layer_type, meta)
     caption_wrapped = "\n".join(textwrap.wrap(caption, width=130)) or ""

@@ -1,6 +1,6 @@
 {
-  "_comment_": "MEANDER_OXBOW (georules-only specialised preset) \u2014 single highly-sinuous channel per level, neck cutoffs deposit FFCH mud plugs in the abandoned oxbow loops, levels stack vertically as a multi-storey channel sandstone. The single-channel-per-level signature comes from the preset's stdevCHsource=1.0 (we KEEP that \u2014 do NOT override). See header of config_full_pv_shoestring.json for the comment-tag convention.",
-  "output_dir": "/pscratch/sd/i/ilgar/georules_dataset/channels_meander_oxbow",
+  "_comment_": "MEANDER_OXBOW (resmill-only specialised preset) \u2014 single highly-sinuous channel per level, neck cutoffs deposit FFCH mud plugs in the abandoned oxbow loops, levels stack vertically as a multi-storey channel sandstone. The single-channel-per-level signature comes from the preset's stdevCHsource=1.0 (we KEEP that \u2014 do NOT override). See header of config_full_pv_shoestring.json for the comment-tag convention.",
+  "output_dir": "/pscratch/sd/i/ilgar/resmill_dataset/channels_meander_oxbow",
   "seed": 42,
   "shard_size": 1000,
   "grid": {

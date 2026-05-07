@@ -1,14 +1,14 @@
-# GeoRules
+# ResMill
 
 Rule-based 3D geological reservoir modeling library.
 
 ## What This Project Does
 
-GeoRules generates synthetic 3D geological models using rule-based and stochastic methods. It targets subsurface reservoir modeling for oil & gas, groundwater, and carbon storage applications.
+ResMill generates synthetic 3D geological models using rule-based and stochastic methods. It targets subsurface reservoir modeling for oil & gas, groundwater, and carbon storage applications.
 
 ## Problem It Solves
 
-Building realistic 3D geological models typically requires expensive commercial software and extensive manual input. GeoRules provides a Python-native, pip-installable alternative that generates geologically plausible reservoir models programmatically. Users define layer types and parameters; the library handles the physics-based geometry and property modeling.
+Building realistic 3D geological models typically requires expensive commercial software and extensive manual input. ResMill provides a Python-native, pip-installable alternative that generates geologically plausible reservoir models programmatically. Users define layer types and parameters; the library handles the physics-based geometry and property modeling.
 
 ## Supported Geology Types
 

@@ -1,25 +1,25 @@
 """Generate one reservoir sample and package outputs for storage.
 
-Wraps a GeoRules Layer construction and ``create_geology`` call with
+Wraps a ResMill Layer construction and ``create_geology`` call with
 deterministic seeding, binarises the resulting facies / active array,
 and casts porosity and permeability to float16 for on-disk compactness.
 
 ``layer_type`` strings exposed by this module:
 
-* ``lobe``     — :py:class:`georules.LobeLayer`
-* ``gaussian`` — :py:class:`georules.GaussianLayer`
-* ``channel``  — :py:class:`georules.ChannelLayer` (Alluvsim-faithful
+* ``lobe``     — :py:class:`resmill.LobeLayer`
+* ``gaussian`` — :py:class:`resmill.GaussianLayer`
+* ``channel``  — :py:class:`resmill.ChannelLayer` (Alluvsim-faithful
   fluvial engine; supports the canonical Pyrcz 2004 presets plus
   MEANDER_OXBOW via the ``preset`` config field — see
   :func:`_apply_preset`)
-* ``delta``    — :py:class:`georules.DeltaLayer` (fluvial-engine delta
+* ``delta``    — :py:class:`resmill.DeltaLayer` (fluvial-engine delta
   with trunk-length / progradation / branch-spread / mouth-bar
   controls; see ``DELTA_FAN`` baseline)
 """
 
 import numpy as np
 
-import georules as gr
+import resmill as gr
 from .captions import caption_for
 
 
@@ -50,11 +50,11 @@ def _apply_preset(params: dict) -> dict:
     preset_name = params.pop("preset", None)
     if preset_name is None:
         return params
-    from georules.layers.channel import (
+    from resmill.layers.channel import (
         PV_SHOESTRING, CB_JIGSAW, CB_LABYRINTH, SH_DISTAL, SH_PROXIMAL,
         MEANDER_OXBOW,
     )
-    from georules.layers.delta import DELTA_FAN
+    from resmill.layers.delta import DELTA_FAN
     PRESETS = {
         "PV_SHOESTRING": PV_SHOESTRING,
         "CB_JIGSAW": CB_JIGSAW,

@@ -2,11 +2,11 @@
 
 Usage::
 
-    python -m georules.dataset.cli path/to/config.json
+    python -m resmill.dataset.cli path/to/config.json
 
 Runs serially (``SLURM_NTASKS`` unset) on a login or interactive node,
 or as N parallel workers under
-``srun -n N --cpu-bind=cores python -m georules.dataset.cli ...``.
+``srun -n N --cpu-bind=cores python -m resmill.dataset.cli ...``.
 Each rank handles job indices ``[rank, rank+world, rank+2*world, ...]``
 of a shuffled global job list, so cheap and expensive samples are mixed
 across ranks and per-rank runtimes balance statistically.
@@ -93,7 +93,7 @@ def main(config_path: str) -> None:
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        print("usage: python -m georules.dataset.cli path/to/config.json",
+        print("usage: python -m resmill.dataset.cli path/to/config.json",
               file=sys.stderr)
         sys.exit(2)
     main(sys.argv[1])

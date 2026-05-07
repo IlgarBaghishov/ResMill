@@ -964,7 +964,7 @@ class fluvial:
         """Kozeny-Carman-coupled per-event ``(poro_mult, log_perm_offset)``.
 
         Replicates the coupling that ``LobeLayer`` uses (see
-        ``georules/layers/lobe.py``): higher poro → higher perm in the
+        ``resmill/layers/lobe.py``): higher poro → higher perm in the
         same event, with a small independent scatter so the relationship
         isn't perfectly 1:1. Slope = ``log_perm_offset_std / poro_mult_std``
         keeps the marginal stds at the requested values while binding

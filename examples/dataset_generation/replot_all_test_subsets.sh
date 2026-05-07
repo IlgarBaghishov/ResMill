@@ -1,7 +1,7 @@
 #!/bin/bash
 # Re-run 200-sample QA subsets for every layer + replot all 4 props
 # (facies, poro, perm, facies_alluvsim) on each. Use this to refresh
-# /pscratch/sd/i/ilgar/georules_dataset/<layer>_test/ after touching
+# /pscratch/sd/i/ilgar/resmill_dataset/<layer>_test/ after touching
 # any layer/sampler code or any config.
 #
 # Skips a preset if its output dir already has 200 fresh shards (so
@@ -9,9 +9,9 @@
 # NOTE: no `set -e` — the piped commands below tolerate empty greps and
 # we want to keep going on a single-preset failure.
 
-PY=/global/cfs/cdirs/m1883/ilgar/conda_envs/georules/bin/python
+PY=/global/cfs/cdirs/m1883/ilgar/conda_envs/resmill/bin/python
 HERE="$(cd "$(dirname "$0")" && pwd)"
-ROOT=/pscratch/sd/i/ilgar/georules_dataset
+ROOT=/pscratch/sd/i/ilgar/resmill_dataset
 RUNNER="$HERE/run_dataset.py"
 PLOTTER="$HERE/plot_dataset.py"
 STATS_PLOTTER="$HERE/plot_dataset_stats.py"

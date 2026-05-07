@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from georules.layers.base import Layer
+from resmill.layers.base import Layer
 
 
 def test_grid_dimensions():

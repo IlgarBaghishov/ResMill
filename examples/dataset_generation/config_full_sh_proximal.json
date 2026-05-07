@@ -1,6 +1,6 @@
 {
   "_comment_": "SH_PROXIMAL (Pyrcz 2004) \u2014 proximal sand-rich sheets with very wide channels and aggressive in-belt avulsion stacking many channels per level. See header of config_full_pv_shoestring.json for the comment-tag convention used here ('skip \u2014 preset default' / 'skip \u2014 class default' / 'VARIED').",
-  "output_dir": "/pscratch/sd/i/ilgar/georules_dataset/channels_sh_proximal",
+  "output_dir": "/pscratch/sd/i/ilgar/resmill_dataset/channels_sh_proximal",
   "seed": 42,
   "shard_size": 1000,
   "grid": {

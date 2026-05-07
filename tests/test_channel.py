@@ -8,7 +8,7 @@ Alluvsim binary lives in ``test_alluvsim_parity.py``.
 import numpy as np
 import pytest
 
-from georules.layers.channel import (
+from resmill.layers.channel import (
     ChannelLayer, ChannelLayer,
     PV_SHOESTRING, CB_JIGSAW,
 )
@@ -96,8 +96,8 @@ def test_cb_jigsaw_preset_via_braided():
 # === Reservoir composition (DeltaLayer back-compat sanity) ===
 
 def test_reservoir_stacking_with_channel():
-    from georules.layers.gaussian import GaussianLayer
-    from georules.reservoir import Reservoir
+    from resmill.layers.gaussian import GaussianLayer
+    from resmill.reservoir import Reservoir
 
     g = GaussianLayer(nx=64, ny=32, nz=8, x_len=640, y_len=320,
                       z_len=4, top_depth=1000)

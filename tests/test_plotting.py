@@ -3,7 +3,7 @@ import matplotlib
 matplotlib.use('Agg')  # Non-interactive backend for testing
 import matplotlib.pyplot as plt
 import pytest
-from georules.plotting import plot_cube_slices, plot_slices, GEORULES_CMAP
+from resmill.plotting import plot_cube_slices, plot_slices, RESMILL_CMAP
 
 
 def _figure_after(fn):
@@ -96,17 +96,17 @@ def test_plot_mask_zeros_false():
     assert fig2 is not None
 
 
-def test_georules_cmap_registered():
-    """GEORULES_CMAP should be importable and registered with matplotlib."""
-    assert GEORULES_CMAP is not None
-    assert GEORULES_CMAP.name == 'georules'
+def test_resmill_cmap_registered():
+    """RESMILL_CMAP should be importable and registered with matplotlib."""
+    assert RESMILL_CMAP is not None
+    assert RESMILL_CMAP.name == 'resmill'
     # Should also be fetchable by name
-    cmap = plt.get_cmap('georules')
+    cmap = plt.get_cmap('resmill')
     assert cmap is not None
 
 
-def test_default_cmap_is_georules():
-    """plot_cube_slices and plot_slices should default to georules cmap."""
+def test_default_cmap_is_resmill():
+    """plot_cube_slices and plot_slices should default to resmill cmap."""
     data = np.random.rand(10, 10, 5)
     fig, ax = plot_cube_slices(data)
     assert fig is not None

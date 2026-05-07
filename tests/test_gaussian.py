@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from georules.layers.gaussian import GaussianLayer
+from resmill.layers.gaussian import GaussianLayer
 
 
 def test_gaussian_shapes():

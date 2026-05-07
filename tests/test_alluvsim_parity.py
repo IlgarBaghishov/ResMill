@@ -1,8 +1,8 @@
-"""GeoRules ↔ Alluvsim parity harness.
+"""ResMill ↔ Alluvsim parity harness.
 
 Drives the Alluvsim Fortran binary at ``/home/ilgar/Alluvsim/build/alluvsim``
 via Alluvsim's own Python helper (``alluvsim_io.run_alluvsim``) and compares
-its facies output to GeoRules' ``ChannelLayer`` /
+its facies output to ResMill' ``ChannelLayer`` /
 ``ChannelLayer`` output for the same parameters.
 
 Two layers of validation:
@@ -21,7 +21,7 @@ Run with::
     python tests/test_alluvsim_parity.py [preset]
 
 Tolerances are intentionally loose because Alluvsim uses GSLIB ``acorni`` RNG
-in a Fortran-specific draw order, while GeoRules uses NumPy. Bit-exact parity
+in a Fortran-specific draw order, while ResMill uses NumPy. Bit-exact parity
 is impossible; the goal is "same architecture".
 """
 from __future__ import annotations
@@ -97,19 +97,19 @@ def run_alluvsim_preset(name: str, *, runs_dir: Path | None = None
 
 
 # ===========================================================================
-# GeoRules runner (will evolve as the engine rewrite progresses)
+# ResMill runner (will evolve as the engine rewrite progresses)
 # ===========================================================================
-def run_georules_preset(name: str, params: dict) -> np.ndarray:
-    """Build a GeoRules channel layer with Alluvsim params and return facies.
+def run_resmill_preset(name: str, params: dict) -> np.ndarray:
+    """Build a ResMill channel layer with Alluvsim params and return facies.
 
     Returns the full 6-class Alluvsim facies array from ``layer.facies``
     (every channel layer now exposes the 6-class array uniformly).
 
-    The mapping from Alluvsim's mCH*/stdevCH* names to GeoRules kwargs is done
+    The mapping from Alluvsim's mCH*/stdevCH* names to ResMill kwargs is done
     in this helper so the rewrite can keep evolving the layer constructor
     signature without breaking the test harness.
     """
-    from georules.layers.channel import ChannelLayer, ChannelLayer
+    from resmill.layers.channel import ChannelLayer, ChannelLayer
 
     nx, ny, nz = params["nx"], params["ny"], params["nz"]
     xsiz, ysiz, zsiz = params["xsiz"], params["ysiz"], params["zsiz"]
@@ -129,29 +129,29 @@ def run_georules_preset(name: str, params: dict) -> np.ndarray:
 
     # Set the seed deterministically so successive runs of the same preset
     # produce the same output (will diverge from Alluvsim because RNGs
-    # differ, but at least GeoRules-side is reproducible).
+    # differ, but at least ResMill-side is reproducible).
     np.random.seed(int(params["seed"]))
 
     # NOTE: The kwarg set passed below is a SUPERSET of what the current
     # ChannelLayer.create_geology accepts. Step 1 of the rewrite
     # (CH-only baseline) will add the missing kwargs to the constructor.
     # Until then, this helper passes only the kwargs that exist.
-    common_kwargs = _build_georules_kwargs(params)
+    common_kwargs = _build_resmill_kwargs(params)
     layer.create_geology(**common_kwargs)
 
     return np.asarray(layer.facies).astype(np.int8)
 
 
-def _build_georules_kwargs(params: dict) -> dict:
-    """Translate Alluvsim ``streamsim.par`` dict → GeoRules
+def _build_resmill_kwargs(params: dict) -> dict:
+    """Translate Alluvsim ``streamsim.par`` dict → ResMill
     ``ChannelLayer.create_geology`` kwargs.
 
-    After the rewrite, GeoRules accepts the full Alluvsim parameter
+    After the rewrite, ResMill accepts the full Alluvsim parameter
     namespace verbatim, so the mapping is mostly a copy. The few
     differences:
 
-    * Alluvsim's ``levels`` (list) → GeoRules ``level_z`` (list).
-    * Alluvsim's ``scour_factor`` → GeoRules accepts the same name as a
+    * Alluvsim's ``levels`` (list) → ResMill ``level_z`` (list).
+    * Alluvsim's ``scour_factor`` → ResMill accepts the same name as a
       kwarg alias for the engine's internal ``A``.
     * Trend file references and on-disk seed/color_incr metadata are
       dropped (they configure the binary, not the algorithm).
@@ -274,9 +274,9 @@ def _alluvsim_cmap():
 
 def dump_side_by_side(fac_a: np.ndarray, fac_g: np.ndarray, name: str,
                       out_path: Path | None = None) -> Path:
-    """Write side-by-side Alluvsim vs GeoRules XY/XZ/YZ slice mosaics.
+    """Write side-by-side Alluvsim vs ResMill XY/XZ/YZ slice mosaics.
 
-    Two rows: Alluvsim (top), GeoRules (bottom).
+    Two rows: Alluvsim (top), ResMill (bottom).
     Three columns: XY at mid-Z, XZ at mid-Y, YZ at mid-X.
     Saved as PNG so I can ``Read`` it during iteration.
     """
@@ -301,7 +301,7 @@ def dump_side_by_side(fac_a: np.ndarray, fac_g: np.ndarray, name: str,
         (f"YZ  (ix={ix})", lambda f: f[ix, :, :].T),
     ]
     for j, (title, slicer) in enumerate(titles):
-        for i, (fac, label) in enumerate(((fac_a, "Alluvsim"), (fac_g, "GeoRules"))):
+        for i, (fac, label) in enumerate(((fac_a, "Alluvsim"), (fac_g, "ResMill"))):
             ax = axes[i, j]
             ax.imshow(slicer(fac), **plot_kw)
             ax.set_title(f"{label} — {title}", fontsize=10)
@@ -328,10 +328,10 @@ def dump_side_by_side(fac_a: np.ndarray, fac_g: np.ndarray, name: str,
 # ===========================================================================
 @pytest.fixture(scope="module", params=PRESET_NAMES)
 def preset_pair(request):
-    """For each preset name, run both Alluvsim and GeoRules; return a dict."""
+    """For each preset name, run both Alluvsim and ResMill; return a dict."""
     name = request.param
     fac_a, params = run_alluvsim_preset(name)
-    fac_g = run_georules_preset(name, params)
+    fac_g = run_resmill_preset(name, params)
     out_png = dump_side_by_side(fac_a, fac_g, name)
     return dict(name=name, params=params, fac_a=fac_a, fac_g=fac_g, plot=out_png)
 
@@ -396,7 +396,7 @@ def main(argv=None):
     print(f"{'preset':14s}  {'NTG_A':>6s} {'NTG_G':>6s}  {'plot':<40s}  per-facies (A vs G)")
     for name in names:
         fac_a, params = run_alluvsim_preset(name)
-        fac_g = run_georules_preset(name, params)
+        fac_g = run_resmill_preset(name, params)
         out = dump_side_by_side(fac_a, fac_g, name)
         fa, fg = facies_fractions(fac_a), facies_fractions(fac_g)
         ntga, ntgg = ntg(fac_a), ntg(fac_g)

@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from georules.layers.lobe import LobeLayer
+from resmill.layers.lobe import LobeLayer
 
 
 def test_lobe_shapes():
