@@ -7,10 +7,10 @@
 #SBATCH -t 24:00:00
 #SBATCH -J resmill_dataset
 #SBATCH --licenses=cfs,SCRATCH
-#SBATCH -A m1883
+#SBATCH -A REPLACE_WITH_YOUR_ALLOCATION
 #SBATCH -o logs/%x-%j.out
 
-# 4 Perlmutter CPU nodes x 128 physical cores = 512 ranks.
+# 4 HPC CPU nodes x 128 physical cores = 512 ranks.
 # Target: 10M samples (2.5M lobe + 2.5M meandering + 2.5M braided +
 #         1.5M delta + 1.0M gaussian) per config_full.json.
 # Measured throughput at full-node load (10K-sample interactive test):
@@ -30,7 +30,7 @@ export OPENBLAS_NUM_THREADS=1
 export PYTHONUNBUFFERED=1
 
 module load conda
-conda activate /global/cfs/cdirs/m1883/ilgar/conda_envs/resmill
+conda activate $WORK/conda_envs/resmill
 
 CFG="$(dirname "$0")/config_full.json"
 

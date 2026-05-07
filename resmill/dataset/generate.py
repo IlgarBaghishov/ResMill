@@ -19,15 +19,15 @@ and casts porosity and permeability to float16 for on-disk compactness.
 
 import numpy as np
 
-import resmill as gr
+import resmill as rm
 from .captions import caption_for
 
 
 _LAYER_FACTORY = {
-    "lobe": gr.LobeLayer,
-    "gaussian": gr.GaussianLayer,
-    "channel": gr.ChannelLayer,
-    "delta": gr.DeltaLayer,
+    "lobe": rm.LobeLayer,
+    "gaussian": rm.GaussianLayer,
+    "channel": rm.ChannelLayer,
+    "delta": rm.DeltaLayer,
 }
 
 

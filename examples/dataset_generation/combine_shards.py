@@ -185,7 +185,7 @@ def verify(preset_dir: Path, out_dir: Path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--root", default="/pscratch/sd/i/ilgar/resmill_dataset")
+    ap.add_argument("--root", default="$SCRATCH/resmill_dataset")
     ap.add_argument("--target", type=int, default=256,
                     help="target number of combined shards per preset")
     ap.add_argument("--workers", type=int, default=32)
@@ -196,7 +196,7 @@ def main():
                     help="subset of presets to combine (default: all 8)")
     args = ap.parse_args()
 
-    root = Path(args.root)
+    root = Path(os.path.expandvars(os.path.expanduser(args.root)))
     all_presets = ["lobes", "channels_pv_shoestring", "channels_cb_labyrinth",
                    "channels_cb_jigsaw", "channels_sh_distal",
                    "channels_sh_proximal", "channels_meander_oxbow", "delta"]

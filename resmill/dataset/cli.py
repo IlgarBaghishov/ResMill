@@ -28,6 +28,8 @@ def main(config_path: str) -> None:
     with open(config_path) as f:
         cfg = json.load(f)
 
+    cfg["output_dir"] = os.path.expandvars(os.path.expanduser(cfg["output_dir"]))
+
     rank = int(os.environ.get("SLURM_PROCID", 0))
     world = int(os.environ.get("SLURM_NTASKS", 1))
 

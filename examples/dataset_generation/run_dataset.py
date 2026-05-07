@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from multiprocessing import Pool
 from pathlib import Path
@@ -57,7 +58,7 @@ def main() -> None:
                         "run doesn't collide with a production output dir)")
     p.add_argument("--cores-per-node", type=int, default=128,
                    help="cores/node for the node-hour estimate "
-                        "(Perlmutter CPU=128, default)")
+                        "(HPC CPU node=128, default)")
     args = p.parse_args()
 
     with open(args.config) as f:
@@ -68,7 +69,8 @@ def main() -> None:
     n_to_run = total_jobs if args.limit is None else min(int(args.limit), total_jobs)
     print(f"joblist size: {total_jobs}  |  running: {n_to_run}")
 
-    output_dir = Path(args.output_dir) if args.output_dir else Path(cfg["output_dir"])
+    raw_output_dir = args.output_dir if args.output_dir else cfg["output_dir"]
+    output_dir = Path(os.path.expandvars(os.path.expanduser(raw_output_dir)))
     output_dir.mkdir(parents=True, exist_ok=True)
     writer = ShardWriter(str(output_dir), rank=0, shard_size=cfg["shard_size"])
     print(f"output: {output_dir}")

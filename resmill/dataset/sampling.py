@@ -4,7 +4,7 @@ Reads the ``layers`` section of a dataset config and returns a
 memory-efficient :class:`JobList` that lazily materialises one
 ``{layer_type, params, seed}`` dict per indexed access. At 10M samples the
 list-of-dicts representation would cost ~8 GB per worker, which does not
-fit 128 concurrent ranks on a Perlmutter CPU node; the compact storage
+fit 128 concurrent ranks on an HPC CPU node; the compact storage
 here keeps the per-rank overhead under ~1 GB even at tens of millions
 of samples.
 

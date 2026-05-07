@@ -7,7 +7,7 @@
 #SBATCH -t 2:00:00
 #SBATCH -J resmill_lobes
 #SBATCH --licenses=cfs,SCRATCH
-#SBATCH -A m1883
+#SBATCH -A REPLACE_WITH_YOUR_ALLOCATION
 #SBATCH -o logs/%x-%j.out
 
 # 2M-sample lobe-only sweep — config_full_lobes.json.
@@ -25,7 +25,7 @@
 #     8 nodes (1024 cores): 1.60 h   queue wait 2-4h+, total ~4-6h (similar)
 #
 #   4 nodes / 4 h wall is the sweet spot: enough margin (25%) over the 3.2h
-#   actual estimate to absorb stragglers, and short enough that NERSC's
+#   actual estimate to absorb stragglers, and short enough that the
 #   regular-queue scheduler still ranks the job high.  -t 4:00:00 fits the
 #   regular queue's 4 h "near-instant" tier on lightly loaded days while
 #   leaving full margin even on the worst Sobol corners.
@@ -46,8 +46,8 @@ export OPENBLAS_NUM_THREADS=1
 export PYTHONUNBUFFERED=1
 
 module load conda
-conda activate /global/cfs/cdirs/m1883/ilgar/conda_envs/resmill
+conda activate $WORK/conda_envs/resmill
 
-CFG="/global/cfs/cdirs/m1883/ilgar/codes/ResMill/examples/dataset_generation/config_full_lobes.json"
+CFG="$(dirname "$0")/config_full_lobes.json"
 
 srun --cpu-bind=cores python -m resmill.dataset.cli "$CFG"

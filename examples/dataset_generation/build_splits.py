@@ -15,8 +15,8 @@ seed → identical assignment. Reviewers / users get a fixed benchmark.
 
 Usage:
     python build_splits.py \\
-        --root /pscratch/sd/i/ilgar/SiliciclasticReservoirs \\
-        --out /pscratch/sd/i/ilgar/SiliciclasticReservoirs/splits
+        --root $SCRATCH/SiliciclasticReservoirs \\
+        --out $SCRATCH/SiliciclasticReservoirs/splits
 """
 import argparse
 from pathlib import Path

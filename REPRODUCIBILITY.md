@@ -3,7 +3,7 @@
 Documents how the public **Siliciclastic Reservoirs** dataset (1,000,000 synthetic 3D reservoir cubes, hosted on HuggingFace) was produced from this engine. Every byte of the dataset can be regenerated bit-for-bit from this codebase plus the saved configs and seeds.
 
 The dataset is at:
-**[`SciLM-ai/SiliciclasticReservoirs`](https://huggingface.co/datasets/SciLM-ai/SiliciclasticReservoirs)** (CC-BY-4.0)
+**[`AnonymouScientist/SiliciclasticReservoirs`](https://huggingface.co/datasets/AnonymouScientist/SiliciclasticReservoirs)** (CC-BY-4.0)
 
 The configs that produced it live in `examples/dataset_generation/config_full_*.json`. The Sobol master seed is `42`. Pin the engine to git tag (TBD) for exact reproduction.
 
@@ -12,7 +12,7 @@ The configs that produced it live in `examples/dataset_generation/config_full_*.
 ## 1. Quickstart
 
 ```bash
-git clone https://github.com/ElnaraRustamzade/ResMill.git
+git clone https://anonymous.4open.science/r/ResMill-7377
 cd ResMill
 pip install -e ".[dev]"
 ```
@@ -20,10 +20,10 @@ pip install -e ".[dev]"
 Verify the engine works on a single sample:
 
 ```python
-import resmill as gr
+import resmill as rm
 from resmill.layers.channel import PV_SHOESTRING
 
-layer = gr.ChannelLayer(nx=64, ny=64, nz=32,
+layer = rm.ChannelLayer(nx=64, ny=64, nz=32,
                         x_len=640, y_len=640, z_len=32, top_depth=0)
 layer.create_geology(seed=42, **PV_SHOESTRING)
 
@@ -44,14 +44,14 @@ pytest tests/test_channel.py
 
 ## 2. Reproducing the published 1M dataset
 
-Total: 184 node-hours on Perlmutter CPU + ~50 GB scratch I/O.
+Total: 184 node-hours on an HPC CPU partition + ~50 GB scratch I/O.
 
 ### 2a. Run the 8 SLURM jobs
 
 `examples/dataset_generation/run_*.sh` are the production scripts. Each one:
 - Loads the `resmill` conda env
 - Runs `srun python -m resmill.dataset.cli config_full_<preset>.json`
-- Each MPI rank handles its rank-stripe of the 1M-job list and writes shards to `/pscratch/.../<output_dir>/shard_r{rank}_s{shard_idx}/`
+- Each MPI rank handles its rank-stripe of the 1M-job list and writes shards to `$SCRATCH/.../<output_dir>/shard_r{rank}_s{shard_idx}/`
 
 Submit in any order (independent jobs):
 ```bash
@@ -76,7 +76,7 @@ Per-preset breakdown (matches the published dataset):
 | `run_meander_oxbow.sh` | 8 × 4h | 64 | 100,000 |
 | `run_delta.sh` | 16 × 10h | 192 (used ~33 in practice) | 150,000 |
 
-Outputs land at `/pscratch/sd/i/ilgar/resmill_dataset/<output_dir>/` (configurable via the `output_dir` field of each `config_full_*.json`).
+Outputs land at `$SCRATCH/resmill_dataset/<output_dir>/` (configurable via the `output_dir` field of each `config_full_*.json`).
 
 ### 2b. Combine shards into the final 256-shard-per-preset layout
 
@@ -84,7 +84,7 @@ Rank-shards (512–2048 per preset, one per MPI rank) are too granular for typic
 
 ```bash
 python examples/dataset_generation/combine_shards.py \
-    --root /pscratch/sd/i/ilgar/resmill_dataset \
+    --root $SCRATCH/resmill_dataset \
     --target 256 \
     --workers 32
 ```
@@ -99,8 +99,8 @@ The script verifies after each preset that:
 
 ```bash
 python examples/dataset_generation/build_splits.py \
-    --root /pscratch/sd/i/ilgar/SiliciclasticReservoirs \
-    --out  /pscratch/sd/i/ilgar/SiliciclasticReservoirs/splits \
+    --root $SCRATCH/SiliciclasticReservoirs \
+    --out  $SCRATCH/SiliciclasticReservoirs/splits \
     --seed 42 --train-frac 0.90 --val-frac 0.05
 ```
 
@@ -110,8 +110,8 @@ Produces `train.parquet`, `validation.parquet`, `test.parquet` — one row per s
 
 ```bash
 # Symlinks to combined data + the staged READMEs + splits
-DST=/pscratch/sd/i/ilgar/SiliciclasticReservoirs
-SRC=/pscratch/sd/i/ilgar/resmill_dataset
+DST=$SCRATCH/SiliciclasticReservoirs
+SRC=$SCRATCH/resmill_dataset
 declare -A MAP=(
   [lobe]=lobes_combined
   [channel_pv_shoestring]=channels_pv_shoestring_combined
@@ -131,7 +131,7 @@ for hf in "${!MAP[@]}"; do
 done
 ```
 
-Then upload with `hf upload SciLM-ai/SiliciclasticReservoirs . --repo-type=dataset`.
+Then upload with `hf upload AnonymouScientist/SiliciclasticReservoirs . --repo-type=dataset`.
 
 ---
 
@@ -142,11 +142,11 @@ Every sample's `params.parquet` row carries the seed and full physics parameters
 ```python
 import pyarrow.parquet as pq
 import numpy as np
-import resmill as gr
+import resmill as rm
 
 # Pick a sample from a shard
 row = pq.read_table(
-    "/pscratch/.../delta_combined/combined_shard_0000/params.parquet"
+    "$SCRATCH/.../delta_combined/combined_shard_0000/params.parquet"
 ).to_pylist()[42]   # sample index 42
 
 # Strip non-engine keys
@@ -161,7 +161,7 @@ seed = int(kwargs.pop("seed"))
 
 # Re-instantiate the layer (config grid kwargs are at examples/dataset_generation/config_full_<preset>.json)
 nx, ny, nz, x_len, y_len, z_len = 80, 80, 50, 800.0, 800.0, 50.0  # delta grid
-layer = gr.DeltaLayer(nx=nx, ny=ny, nz=nz,
+layer = rm.DeltaLayer(nx=nx, ny=ny, nz=nz,
                       x_len=x_len, y_len=y_len, z_len=z_len, top_depth=0)
 np.random.seed(seed)
 layer.create_geology(**kwargs)
@@ -183,7 +183,7 @@ Quick sanity check on any shard dir:
 
 ```bash
 python examples/dataset_generation/plot_dataset.py \
-    /pscratch/sd/i/ilgar/resmill_dataset/delta \
+    $SCRATCH/resmill_dataset/delta \
     --workers 32 --limit 100
 ```
 
@@ -193,7 +193,7 @@ Per-layer-type summary stats:
 
 ```bash
 python examples/dataset_generation/plot_dataset_stats.py \
-    /pscratch/sd/i/ilgar/resmill_dataset/delta
+    $SCRATCH/resmill_dataset/delta
 ```
 
 Produces `stats_pictures/stats_delta.png` with NTG / poro / perm / geometry histograms + slim-column correlation heatmap.
@@ -251,19 +251,19 @@ If you use this dataset or engine, please cite:
 
 ```bibtex
 @misc{siliciclastic_reservoirs_2026,
-  author       = {Baghishov, Ilgar},
+  author       = {Anonymous},
   title        = {{Siliciclastic Reservoirs}: 1M Synthetic 3D Reservoir Geology Cubes for Conditional Generative Modeling},
   year         = {2026},
   publisher    = {HuggingFace},
-  howpublished = {\url{https://huggingface.co/datasets/SciLM-ai/SiliciclasticReservoirs}}
+  howpublished = {\url{https://huggingface.co/datasets/AnonymouScientist/SiliciclasticReservoirs}}
 }
 
 @software{resmill_engine_2026,
-  author       = {Baghishov, Ilgar},
+  author       = {Anonymous},
   title        = {{ResMill}: Rule-Based Synthetic 3D Reservoir Geology Engine},
   year         = {2026},
   publisher    = {GitHub},
-  howpublished = {\url{https://github.com/ElnaraRustamzade/ResMill}}
+  howpublished = {\url{https://anonymous.4open.science/r/ResMill-7377}}
 }
 ```
 
@@ -282,4 +282,4 @@ The engine builds on the streamline-based fluvial architecture by Pyrcz & Deutsc
 
 ## Issues / Contact
 
-File issues at [`github.com/ElnaraRustamzade/ResMill/issues`](https://github.com/ElnaraRustamzade/ResMill/issues).
+File issues at [`anonymous.4open.science/r/ResMill-7377`](https://anonymous.4open.science/r/ResMill-7377).

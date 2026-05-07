@@ -1,6 +1,6 @@
 """ResMill ↔ Alluvsim parity harness.
 
-Drives the Alluvsim Fortran binary at ``/home/ilgar/Alluvsim/build/alluvsim``
+Drives the Alluvsim Fortran binary at ``$HOME/Alluvsim/build/alluvsim``
 via Alluvsim's own Python helper (``alluvsim_io.run_alluvsim``) and compares
 its facies output to ResMill' ``ChannelLayer`` /
 ``ChannelLayer`` output for the same parameters.
@@ -36,7 +36,7 @@ import pytest
 # ---------------------------------------------------------------------------
 # Path wiring: import Alluvsim's Python harness without modifying that repo
 # ---------------------------------------------------------------------------
-ALLUVSIM_ROOT = Path("/home/ilgar/Alluvsim")
+ALLUVSIM_ROOT = Path.home() / "Alluvsim"
 ALLUVSIM_NOTEBOOKS = ALLUVSIM_ROOT / "notebooks"
 ALLUVSIM_RUNS = ALLUVSIM_ROOT / "runs"
 ALLUVSIM_EXE = ALLUVSIM_ROOT / "build" / "alluvsim"
@@ -84,7 +84,7 @@ def run_alluvsim_preset(name: str, *, runs_dir: Path | None = None
     if not ALLUVSIM_EXE.exists():
         raise FileNotFoundError(
             f"Alluvsim binary not found at {ALLUVSIM_EXE} — "
-            f"build it via /home/ilgar/Alluvsim/build/build_linux.sh")
+            f"build it via $HOME/Alluvsim/build/build_linux.sh")
     if name not in ALLUVSIM_PRESETS:
         raise KeyError(f"unknown preset {name!r}; have {PRESET_NAMES}")
     params = ALLUVSIM_PRESETS[name]()

@@ -1,6 +1,6 @@
 {
   "_comment_": "Full 10M-reservoir config \u2014 curated parameter set per layer (only knobs that visually change the reservoir). Channels & delta drive the new Alluvsim-faithful fluvial engine. Channels mix the 5 Pyrcz-2004 presets via the 'preset' field; user-supplied params override preset defaults.",
-  "output_dir": "/pscratch/sd/i/ilgar/resmill_dataset/lobes",
+  "output_dir": "$SCRATCH/resmill_dataset/lobes",
   "seed": 42,
   "shard_size": 1000,
   "grid": {

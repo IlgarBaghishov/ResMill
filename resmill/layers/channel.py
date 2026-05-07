@@ -241,7 +241,7 @@ class ChannelLayer(Layer):
 
         All ``mFoo`` / ``stdevFoo`` kwargs are direct ports of Alluvsim's
         per-event Gaussian-draw parameters (``streamsim.par`` field set);
-        see ``/home/ilgar/Alluvsim/CLAUDE.md`` §4 for full docs.
+        see ``$HOME/Alluvsim/CLAUDE.md`` §4 for full docs.
 
         Notable mappings:
 
@@ -310,7 +310,7 @@ class ChannelLayer(Layer):
 
 
 # ---------------------------------------------------------------------------
-# Importable parameter presets (mirror /home/ilgar/Alluvsim/runs/run_presets.py).
+# Importable parameter presets (mirror $HOME/Alluvsim/runs/run_presets.py).
 #
 # Use as `ChannelLayer.create_geology(**PV_SHOESTRING)` or pass individual
 # overrides on top.

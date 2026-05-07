@@ -1,8 +1,8 @@
-# ResMill dataset generation on Perlmutter CPU
+# ResMill dataset generation on an HPC CPU partition
 
 Generate a large 3D reservoir dataset by sweeping the parameter space of
 every ResMill layer type (Lobe, Gaussian, Meandering, Braided, Delta).
-Designed for 1–10M samples on Perlmutter CPU nodes, with output staged
+Designed for 1–10M samples on HPC CPU nodes, with output staged
 for direct upload to HuggingFace and consumption by GenFlows.
 
 ## What it produces
@@ -38,23 +38,23 @@ between parallel workers.
 ### 1. Create the env (one-time)
 ```bash
 module load conda
-conda create -p /global/cfs/cdirs/m1883/ilgar/conda_envs/resmill python=3.12 -y
-conda activate /global/cfs/cdirs/m1883/ilgar/conda_envs/resmill
-pip install -e /global/cfs/cdirs/m1883/ilgar/codes/ResMill
-pip install -e '/global/cfs/cdirs/m1883/ilgar/codes/ResMill[dataset]'
+conda create -p $WORK/conda_envs/resmill python=3.12 -y
+conda activate $WORK/conda_envs/resmill
+pip install -e $WORK/codes/ResMill
+pip install -e '$WORK/codes/ResMill[dataset]'
 ```
 
 ### 2. Serial smoke test (10 samples, ~1 minute)
 ```bash
-conda activate /global/cfs/cdirs/m1883/ilgar/conda_envs/resmill
+conda activate $WORK/conda_envs/resmill
 python -m resmill.dataset.cli examples/dataset_generation/config_demo.json
 ```
 Inspect one shard at
-`/pscratch/sd/$USER/resmill_dataset_demo/shard_r0000_s000000/`.
+`$SCRATCH/resmill_dataset_demo/shard_r0000_s000000/`.
 
 ### 3. 128-way parallel test on an interactive node (1000 samples)
 ```bash
-salloc -N 1 -C cpu -q interactive --ntasks-per-node 128 -t 00:30:00 -A m1883
+salloc -N 1 -C cpu -q interactive --ntasks-per-node 128 -t 00:30:00 -A REPLACE_WITH_YOUR_ALLOCATION
 srun -n 128 --cpu-bind=cores \
      python -m resmill.dataset.cli examples/dataset_generation/config_parallel_test.json
 ```
@@ -77,7 +77,7 @@ layer mix:
 | **Total** | **10,000,000** |
 
 On-disk size at 64×64×32: ~6.4 TB (facies int8 + poro float16 + perm
-float16). Make sure `$PSCRATCH` has enough quota.
+float16). Make sure `$SCRATCH` has enough quota.
 
 For a smaller 1M run: reduce each `count` by 10× in `config_full.json`
 and change `run.sh` to `-N 2 -t 05:00:00`. For different layer mixes,
@@ -162,7 +162,7 @@ class ResMillDataset(Dataset):
 
 ```bash
 huggingface-cli upload <user>/resmill-reservoirs \
-    /pscratch/sd/$USER/resmill_dataset --repo-type dataset
+    $SCRATCH/resmill_dataset --repo-type dataset
 ```
 
 `params.parquet` is natively readable by `datasets.load_dataset("parquet", ...)`.

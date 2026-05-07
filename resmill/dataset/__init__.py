@@ -8,7 +8,7 @@ Public entry points:
 - ``resmill.dataset.caption_for``    — natural-language description of one sample
 
 The CLI (``python -m resmill.dataset.cli path/to/config.json``) combines
-these with a SLURM_PROCID rank-stripe loop for multi-node Perlmutter CPU
+these with a SLURM_PROCID rank-stripe loop for multi-node HPC CPU
 runs. See ``examples/dataset_generation/`` for configs and a submit script.
 """
 

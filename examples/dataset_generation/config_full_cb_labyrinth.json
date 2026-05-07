@@ -1,6 +1,6 @@
 {
   "_comment_": "CB_LABYRINTH (Pyrcz 2004) \u2014 connected-but-jigsaw labyrinthine channel-belt architecture; medium NTG, low-sinuosity channels with rare avulsion, prominent abandoned-mud plugs giving the labyrinth signature. See header of config_full_pv_shoestring.json for the comment-tag convention used here ('skip \u2014 preset default' / 'skip \u2014 class default' / 'VARIED').",
-  "output_dir": "/pscratch/sd/i/ilgar/resmill_dataset/channels_cb_labyrinth",
+  "output_dir": "$SCRATCH/resmill_dataset/channels_cb_labyrinth",
   "seed": 42,
   "shard_size": 1000,
   "grid": {

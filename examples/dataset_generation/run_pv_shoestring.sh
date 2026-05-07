@@ -7,7 +7,7 @@
 #SBATCH -t 2:00:00
 #SBATCH -J resmill_pv_shoestring
 #SBATCH --licenses=cfs,SCRATCH
-#SBATCH -A m1883
+#SBATCH -A REPLACE_WITH_YOUR_ALLOCATION
 #SBATCH -o logs/%x-%j.out
 
 # 1M PV_SHOESTRING samples on config_full_pv_shoestring.json.
@@ -26,8 +26,8 @@ export OPENBLAS_NUM_THREADS=1
 export PYTHONUNBUFFERED=1
 
 module load conda
-conda activate /global/cfs/cdirs/m1883/ilgar/conda_envs/resmill
+conda activate $WORK/conda_envs/resmill
 
-CFG="/global/cfs/cdirs/m1883/ilgar/codes/ResMill/examples/dataset_generation/config_full_pv_shoestring.json"
+CFG="$(dirname "$0")/config_full_pv_shoestring.json"
 
 srun --cpu-bind=cores python -m resmill.dataset.cli "$CFG"
